@@ -1,0 +1,73 @@
+Fragua CLI — Proprietary Software License
+Copyright (c) 2026 Mario Alberto Chávez Cárdenas. All rights reserved.
+
+This software, including the "fragua" command-line binary and any accompanying
+files (the "Software"), is the proprietary and confidential property of Mario
+Alberto Chávez Cárdenas (the "Licensor"). The Software is licensed, not sold.
+
+1. License grant.
+   Subject to your continuous compliance with this License and with the Fragua
+   Terms of Service published at https://fragua.app/terms (the "Terms"), the
+   Licensor grants you a limited, non-exclusive, non-transferable,
+   non-sublicensable, revocable license to download, install, and run unmodified
+   copies of the Software on machines you own or control, solely to use the
+   Fragua service as permitted by the Terms.
+
+2. Relationship to the Terms of Service.
+   Your use of the Software is governed by the Terms, which are incorporated
+   into this License by reference. If there is a conflict between this License
+   and the Terms with respect to use of the Software, this License controls for
+   the Software itself; the Terms control for the Fragua service. If you do not
+   agree to the Terms, you may not use the Software.
+
+3. Restrictions.
+   Except to the extent this restriction is prohibited by applicable law, you
+   may not, and may not permit any third party to:
+   (a) sell, rent, lease, lend, redistribute, sublicense, or otherwise transfer
+       the Software to any third party;
+   (b) modify, adapt, translate, or create derivative works of the Software;
+   (c) reverse engineer, decompile, disassemble, or otherwise attempt to derive
+       the source code, structure, or underlying ideas of the Software;
+   (d) remove, alter, or obscure any copyright, trademark, or other proprietary
+       notices contained in or on the Software;
+   (e) use the Software to build a competing product or service, or for any
+       unlawful purpose.
+
+4. Reservation of rights.
+   The Software is licensed, not sold. The Licensor retains all right, title,
+   and interest in and to the Software, including all intellectual property
+   rights therein. No rights are granted except as expressly set out in this
+   License.
+
+5. No warranty.
+   THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY
+   KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND
+   NON-INFRINGEMENT.
+
+6. Limitation of liability.
+   TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
+   LICENSOR BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR
+   PUNITIVE DAMAGES, OR FOR ANY LOSS OF PROFITS, DATA, OR GOODWILL, ARISING OUT
+   OF OR RELATED TO YOUR USE OF OR INABILITY TO USE THE SOFTWARE, WHETHER BASED
+   ON WARRANTY, CONTRACT, TORT, OR ANY OTHER LEGAL THEORY, EVEN IF THE LICENSOR
+   HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+7. Termination.
+   This License is effective until terminated. It terminates automatically and
+   without notice if you breach any of its terms, and may also be terminated as
+   provided in the Terms. Upon termination, you must stop using the Software and
+   destroy all copies in your possession or control. Sections 3 through 9
+   survive termination.
+
+8. Governing law.
+   This License is governed by the laws of the United Mexican States, without
+   regard to its conflict-of-laws rules, except where mandatory local law
+   applies.
+
+9. Entire agreement.
+   This License, together with the Terms, constitutes the entire agreement
+   between you and the Licensor regarding the Software and supersedes all prior
+   or contemporaneous understandings on that subject.
+
+For licensing inquiries, contact the Licensor through https://fragua.app.
