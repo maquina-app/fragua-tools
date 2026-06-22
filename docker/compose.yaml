@@ -1,0 +1,47 @@
+# Fragua agent — Docker Compose
+#
+# Host-independent: the running agent mounts only named volumes — no host paths,
+# no SSH-agent forwarding. Everything (credentials, Git identity, SSH key, Claude
+# token) is set up once inside the container and persists in the volumes below.
+#
+# Prerequisites (see SETUP.md):
+#   1. Build or pull the image and tag it `local/fragua:latest`
+#   2. Create the five named volumes once:
+#        docker volume create fragua-config
+#        docker volume create fragua-gh
+#        docker volume create fragua-claude
+#        docker volume create fragua-ssh
+#        docker volume create fragua-workdir
+#   3. Claude token (host): run `claude setup-token` on your Mac (needs a
+#      browser), then one-time setup INSIDE the container writes it — plus the
+#      gh/fragua logins, Git identity, and an SSH key — into the volumes above.
+#
+# Then:   docker compose up -d
+#         docker compose logs --follow
+#         docker compose exec fragua-agent fragua status
+
+services:
+  fragua-agent:
+    image: local/fragua:latest
+    # All config-dir env vars (XDG_CONFIG_HOME, GH_CONFIG_DIR, CLAUDE_CONFIG_DIR,
+    # GIT_CONFIG_GLOBAL) are baked into the image, and the entrypoint loads the
+    # Claude token from the fragua-config volume — so nothing is needed here.
+    volumes:
+      - fragua-config:/fragua-config:rw     # fragua status/DB, git identity, claude token
+      - fragua-gh:/fragua-gh:ro             # gh token (read-only at runtime)
+      - fragua-ssh:/root/.ssh:ro            # the container's own SSH keypair
+      - fragua-claude:/fragua-claude:rw     # claude session/project state
+      - fragua-workdir:/fragua-workdir:rw   # agent working tree
+    restart: unless-stopped
+
+volumes:
+  fragua-config:
+    external: true
+  fragua-gh:
+    external: true
+  fragua-ssh:
+    external: true
+  fragua-claude:
+    external: true
+  fragua-workdir:
+    external: true

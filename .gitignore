@@ -1,0 +1,17 @@
+# Scratch / working files
+tmp/
+
+# Local-only maintainer docs (e.g. RELEASING.local.md)
+*.local.md
+
+# Secrets — never commit credentials
+.env
+.env.*
+*.pem
+*.key
+secrets
+secrets/
+**/secrets/
+*.secret
+*_secret
+.secrets
