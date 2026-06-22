@@ -135,10 +135,15 @@ RUN bundle config set --global build.nokogiri \
 RUN gem install bundler \
     && gem install rails
 
-# ── Claude Code ───────────────────────────────────────────────────────────────
-RUN npm install -g @anthropic-ai/claude-code
+# ── Claude Code + Fragua CLI ──────────────────────────────────────────────────
+# Bump CLI_REFRESH to re-fetch the latest Claude Code AND fragua release without
+# a full --no-cache rebuild — it busts this layer and everything after it:
+#   container build --build-arg CLI_REFRESH=$(date +%s) ...
+ARG CLI_REFRESH=0
 
-# ── Fragua CLI ────────────────────────────────────────────────────────────────
+RUN echo "cli refresh=${CLI_REFRESH}" \
+    && npm install -g @anthropic-ai/claude-code
+
 RUN curl -fsSL \
     https://github.com/maquina-app/fragua-tools/releases/latest/download/install.sh | sh
 

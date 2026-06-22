@@ -285,6 +285,9 @@ docker compose down
 docker build --no-cache -t local/fragua:latest .
 docker compose up -d
 
+# just update the CLIs (Claude Code + fragua) without a full rebuild:
+./build.sh --refresh-cli    # or: docker build --build-arg CLI_REFRESH=$(date +%s) -t local/fragua:latest .
+
 # inspect the workdir without touching the running agent
 docker run --rm -v fragua-workdir:/data:ro alpine ls -la /data
 

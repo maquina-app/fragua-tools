@@ -6,6 +6,7 @@
 #   ./build.sh                 # build + push  ghcr.io/maquina-app/fragua-container:latest
 #   ./build.sh --no-push       # build only, no registry push
 #   ./build.sh --no-cache      # force a clean rebuild from scratch
+#   ./build.sh --refresh-cli   # re-fetch the latest Claude Code + fragua CLI (skips cache for those layers)
 #   ./build.sh --engine docker # use `docker` instead of Apple `container`
 #
 # Authentication for the push (only needed once per machine):
@@ -28,12 +29,14 @@ REF="${REGISTRY}/${IMAGE}:${TAG}"
 # ── Parse args ────────────────────────────────────────────────────────────────
 PUSH=1
 NO_CACHE=""
+REFRESH_ARG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --no-push)  PUSH=0 ;;
-    --no-cache) NO_CACHE="--no-cache" ;;
-    --engine)   ENGINE="$2"; shift ;;
-    -h|--help)  sed -n '2,22p' "$0"; exit 0 ;;
+    --no-push)       PUSH=0 ;;
+    --no-cache)      NO_CACHE="--no-cache" ;;
+    --refresh-cli)   REFRESH_ARG="--build-arg CLI_REFRESH=$(date +%s)" ;;
+    --engine)        ENGINE="$2"; shift ;;
+    -h|--help)       sed -n '2,23p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
   shift
@@ -49,7 +52,7 @@ fi
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 echo "==> Building ${REF} with '${ENGINE}'"
-"$ENGINE" build $NO_CACHE -t "$REF" .
+"$ENGINE" build $NO_CACHE $REFRESH_ARG -t "$REF" .
 
 if [[ "$PUSH" -eq 0 ]]; then
   echo "==> Built ${REF} (push skipped)"

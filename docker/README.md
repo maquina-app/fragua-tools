@@ -90,9 +90,16 @@ to GHCR by default.
 # clean rebuild
 ./build.sh --no-cache
 
+# re-fetch the latest Claude Code + fragua CLI (keeps the heavy layers cached)
+./build.sh --refresh-cli
+
 # multi-arch build + push via buildx (Docker only)
 ./build.sh --platform linux/amd64,linux/arm64
 ```
+
+> `--refresh-cli` busts only the Claude Code + fragua install layers (and the
+> cheap ones after), so you get the newest CLIs without the ~10–15 min full
+> rebuild. Under the hood it passes `--build-arg CLI_REFRESH=$(date +%s)`.
 
 ### Authentication
 

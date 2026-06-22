@@ -311,6 +311,9 @@ container stop fragua-agent && container rm fragua-agent
 container build --no-cache -t local/fragua:latest .
 # re-run 4b — no re-login, workdir data preserved
 
+# just update the CLIs (Claude Code + fragua) without a full rebuild:
+./build.sh --refresh-cli    # or: container build --build-arg CLI_REFRESH=$(date +%s) -t local/fragua:latest .
+
 # nuclear — wipe everything (forces full re-setup, incl. a new SSH key)
 container rm -f fragua-agent
 container volume delete fragua-workdir fragua-config fragua-gh fragua-claude fragua-ssh

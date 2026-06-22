@@ -7,6 +7,7 @@
 #   ./build.sh                          # build + push  ghcr.io/maquina-app/fragua-docker:latest
 #   ./build.sh --no-push                # build only, no registry push
 #   ./build.sh --no-cache               # force a clean rebuild from scratch
+#   ./build.sh --refresh-cli            # re-fetch the latest Claude Code + fragua CLI (skips cache for those layers)
 #   ./build.sh --platform linux/amd64,linux/arm64
 #                                       # multi-arch build via buildx (pushes directly)
 #
@@ -30,12 +31,14 @@ REF="${REGISTRY}/${IMAGE}:${TAG}"
 PUSH=1
 NO_CACHE=""
 PLATFORM=""
+REFRESH_ARG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --no-push)  PUSH=0 ;;
-    --no-cache) NO_CACHE="--no-cache" ;;
-    --platform) PLATFORM="$2"; shift ;;
-    -h|--help)  sed -n '2,21p' "$0"; exit 0 ;;
+    --no-push)        PUSH=0 ;;
+    --no-cache)       NO_CACHE="--no-cache" ;;
+    --refresh-cli)    REFRESH_ARG="--build-arg CLI_REFRESH=$(date +%s)" ;;
+    --platform)       PLATFORM="$2"; shift ;;
+    -h|--help)        sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
   shift
@@ -66,7 +69,7 @@ if [[ -n "$PLATFORM" ]]; then
   fi
   maybe_login
   echo "==> Building + pushing ${REF} for ${PLATFORM} via buildx"
-  "$ENGINE" buildx build $NO_CACHE \
+  "$ENGINE" buildx build $NO_CACHE $REFRESH_ARG \
     --platform "$PLATFORM" \
     -t "$REF" \
     --push \
@@ -77,7 +80,7 @@ fi
 
 # ── Single-arch path ──────────────────────────────────────────────────────────
 echo "==> Building ${REF} with '${ENGINE}'"
-"$ENGINE" build $NO_CACHE -t "$REF" .
+"$ENGINE" build $NO_CACHE $REFRESH_ARG -t "$REF" .
 
 if [[ "$PUSH" -eq 0 ]]; then
   echo "==> Built ${REF} (push skipped)"
