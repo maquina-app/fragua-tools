@@ -200,9 +200,11 @@ container run --rm -it \
 # 0. Create the secret subdirs (the empty volume hides the image's baked dirs)
 mkdir -p /fragua-secrets/gh /fragua-secrets/ssh && chmod 700 /fragua-secrets/ssh
 
-# 1. GitHub CLI — device-code flow works headless (opens a code + URL)
-#    Writes to GH_CONFIG_DIR=/fragua-secrets/gh
-gh auth login
+# 1. GitHub CLI — device-code flow works headless (opens a code + URL).
+#    --insecure-storage forces the token into GH_CONFIG_DIR=/fragua-secrets/gh on
+#    the volume; without it gh may save to an in-VM keyring that doesn't persist
+#    (this image ships dbus, so gh otherwise prefers the keyring).
+gh auth login --insecure-storage
 
 # 2. Git identity + SSH key — do EITHER Option A or Option B.
 #    /root/.ssh is a symlink → /fragua-secrets/ssh, so keys land in the volume.
@@ -354,7 +356,14 @@ container volume delete fragua-workdir fragua-config fragua-secrets fragua-data
   volume; the image's entrypoint reads it on every run. (An explicit
   `--env CLAUDE_CODE_OAUTH_TOKEN` overrides the file if you prefer.)
 - **`gh` says "not logged in" at runtime** — the `fragua-secrets` volume isn't
-  mounted, or it's empty. Re-run the Phase 3c `gh auth login` if needed.
+  mounted, or it's empty. Re-run the Phase 3c `gh auth login --insecure-storage`.
+- **`gh` asks you to authenticate on every run / the token never persists** — this
+  image ships `dbus`, so plain `gh auth login` saves the token to an in-VM keyring
+  that isn't on the volume. Fix: (1) confirm `echo $GH_CONFIG_DIR` prints
+  `/fragua-secrets/gh` — an old image prints `/fragua-gh`, which isn't mounted, so
+  the token is discarded on exit; rebuild + re-tag `local/fragua:latest` if so.
+  (2) Re-run `gh auth login --insecure-storage` and verify with
+  `grep -c oauth_token /fragua-secrets/gh/hosts.yml` (expect > 0).
 - **`gh`/`git` can't write at runtime ("read-only file system")** — expected:
   `fragua-secrets` is `ro` at runtime by design. To rotate the token or key,
   re-run the Phase 3c setup shell (which mounts it `:rw`).
@@ -441,8 +450,14 @@ container run --rm -it \
 ```
 
 Then start the agent normally (Phase 4b). `fragua-data` stays empty — gems and node
-modules re-install on first use and persist from then on. Once the agent is online
-and `git push` works, you can delete the old volumes:
+modules re-install on first use and persist from then on.
+
+> If `gh` reports "not authenticated" after the restore, the backed-up `hosts.yml`
+> was written by an older `gh` schema (and this image prefers a keyring anyway).
+> Just re-run the login in a `--bash` session: `gh auth login --insecure-storage`.
+> The SSH key restore is schema-agnostic and needs no redo.
+
+Once the agent is online and `git push` works, you can delete the old volumes:
 
 ```bash
 container volume delete fragua-gh fragua-ssh fragua-claude
