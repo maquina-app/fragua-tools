@@ -51,23 +51,29 @@ the container (see [SETUP.md](./SETUP.md)), and everything persists in volumes
 across rebuilds and `docker compose down`. This is necessary because on macOS
 `gh`/`claude` keep tokens in the Keychain, so a host bind-mount can't deliver them.
 
-| Volume          | Mount path        | Runtime mode | Purpose                                              |
-| --------------- | ----------------- | ------------ | ---------------------------------------------------- |
-| `fragua-config` | `/fragua-config`  | `rw` | fragua token + status/DB, Git identity (`gitconfig`), Claude token (`XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`) |
-| `fragua-gh`     | `/fragua-gh`      | `ro` | GitHub CLI token (`GH_CONFIG_DIR`)                   |
-| `fragua-ssh`    | `/root/.ssh`      | `ro` | the container's own SSH keypair                      |
-| `fragua-claude` | `/fragua-claude`  | `rw` | Claude Code session state (`CLAUDE_CONFIG_DIR`)      |
-| `fragua-workdir`| `/fragua-workdir` | `rw` | Agent working tree — clones, `bundle install`, DBs, assets (`FRAGUA_WORKDIR`) |
+| Volume           | Mount path        | Runtime mode | Purpose                                              |
+| ---------------- | ----------------- | ------------ | ---------------------------------------------------- |
+| `fragua-config`  | `/fragua-config`  | `rw` | fragua token + status/DB, Git identity (`gitconfig`), Claude token + session state (`XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, `CLAUDE_CONFIG_DIR=/fragua-config/claude`) |
+| `fragua-secrets` | `/fragua-secrets` | `ro` | GitHub CLI token (`GH_CONFIG_DIR=/fragua-secrets/gh`) + the container's SSH keypair (`/root/.ssh` → `/fragua-secrets/ssh`). Mounted `rw` only during setup. |
+| `fragua-workdir` | `/fragua-workdir` | `rw` | Agent working tree — clones, `bundle install`, DBs, assets (`FRAGUA_WORKDIR`) |
+| `fragua-data`    | `/fragua-data`    | `rw` | Runtime-installed gems + global node modules + bins (`GEM_HOME=/fragua-data/gems`, `NPM_CONFIG_PREFIX=/fragua-data/npm`) — so agent installs survive a rebuild |
 
 Create them once:
 
 ```bash
 docker volume create fragua-config
-docker volume create fragua-gh
-docker volume create fragua-claude
-docker volume create fragua-ssh
+docker volume create fragua-secrets
 docker volume create fragua-workdir
+docker volume create fragua-data
 ```
+
+`fragua-secrets` holds the credentials the agent uses but must not overwrite (gh
+token + SSH **private** key), so it's mounted **read-only at runtime** — and `rw`
+only during the one-time setup that writes them. `fragua-data` persists everything
+the agent installs at runtime (`gem install`, `bundle install`, `npm install -g`),
+which otherwise lives in the container's writable layer and is lost on rebuild;
+the build-time toolchain (Ruby, Node, Rails, Claude Code, fragua) stays in the
+image so `--refresh-cli` still updates it.
 
 During the one-time setup you choose whether to **reuse your existing host SSH
 key + Git identity** or **generate a fresh one** for the container (a new key

@@ -6,10 +6,15 @@ stack and all native development libraries pre-installed.
 
 **Why this setup:** maximum isolation + full stack. Agent runs — `bundle install`,
 DB migrations, asset compilation — all stay inside the `fragua-workdir` volume.
-Both volumes survive image rebuilds, so there's no re-login and no lost work
+All four volumes survive image rebuilds, so there's no re-login and no lost work
 after an update. Nothing in your Mac's `~/` is exposed to agent writes.
 
 > Requires Apple silicon (M-series) and macOS 15 or later.
+
+> **Already running the older five-volume layout** (`fragua-gh`, `fragua-ssh`,
+> `fragua-claude`)? **Back up first**, then migrate — see
+> [Migrating from the five-volume layout](#migrating-from-the-five-volume-layout)
+> at the end before you rebuild.
 
 ---
 
@@ -118,26 +123,28 @@ and a dedicated SSH key — so the running agent depends on **nothing** from you
 Mac (no `--ssh`, no `~/.gitconfig` bind, no `--env` token). The only host action
 is generating the Claude token once (it needs a browser).
 
-### 3a. Create the five named volumes
+### 3a. Create the four named volumes
 
 ```bash
-container volume create fragua-config    # fragua token, git identity, claude token → /fragua-config
-container volume create fragua-gh         # gh token        → /fragua-gh   (GH_CONFIG_DIR)
-container volume create fragua-claude     # claude state    → /fragua-claude (CLAUDE_CONFIG_DIR)
-container volume create fragua-ssh        # SSH keypair     → /root/.ssh
-container volume create fragua-workdir    # agent work      → /fragua-workdir (FRAGUA_WORKDIR)
+container volume create fragua-config     # fragua token, git identity, claude token + state → /fragua-config
+container volume create fragua-secrets    # gh token + SSH keypair → /fragua-secrets (ro at runtime)
+container volume create fragua-workdir    # agent work             → /fragua-workdir (FRAGUA_WORKDIR)
+container volume create fragua-data       # runtime gems + node modules + bins → /fragua-data
 
-# confirm all five exist before running the agent
+# confirm all four exist before running the agent
 container volume list
 ```
 
 | Volume           | Mount path        | Runtime mode | Holds                                              |
 | ---------------- | ----------------- | ------------ | -------------------------------------------------- |
-| `fragua-config`  | `/fragua-config`  | `rw`         | fragua token + status/DB, `gitconfig`, claude token (`XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`) |
-| `fragua-gh`      | `/fragua-gh`      | `ro`         | GitHub CLI token (`GH_CONFIG_DIR`)                 |
-| `fragua-ssh`     | `/root/.ssh`      | `ro`         | the container's own SSH keypair                    |
-| `fragua-claude`  | `/fragua-claude`  | `rw`         | Claude Code session state (`CLAUDE_CONFIG_DIR`)    |
+| `fragua-config`  | `/fragua-config`  | `rw`         | fragua token + status/DB, `gitconfig` (`GIT_CONFIG_GLOBAL`), claude token + state (`CLAUDE_CONFIG_DIR=/fragua-config/claude`) |
+| `fragua-secrets` | `/fragua-secrets` | `ro`*        | gh token (`GH_CONFIG_DIR=/fragua-secrets/gh`) + SSH keypair (`/root/.ssh` → `/fragua-secrets/ssh`) |
 | `fragua-workdir` | `/fragua-workdir` | `rw`         | clones, `bundle install`, DBs, assets (`FRAGUA_WORKDIR`) |
+| `fragua-data`    | `/fragua-data`    | `rw`         | runtime `gem install` / `bundle install` / `npm install -g` output (`GEM_HOME`, `NPM_CONFIG_PREFIX`) |
+
+\* `fragua-secrets` is mounted **`rw` during the one-time setup below** (so you can
+write the gh token + SSH key) and **`ro` for every normal run** — the agent uses
+the credentials but can't overwrite them.
 
 ### 3b. Generate the Claude token on your Mac (one host step)
 
@@ -176,29 +183,32 @@ Two steps — **Git identity** and the **SSH key** — let you choose:
 Start the setup shell. The two `host-*` mounts at the end are needed **only for
 Option A** (to copy your files in) — omit them for Option B:
 
+Mount `fragua-secrets` **`rw`** for setup (it's `ro` at runtime). The config-dir
+env vars (`XDG_CONFIG_HOME`, `GH_CONFIG_DIR`, `CLAUDE_CONFIG_DIR`,
+`GIT_CONFIG_GLOBAL`) are baked into the image, so they don't need `--env` here.
+The two `host-*` mounts are needed **only for Option A** — omit them for Option B:
+
 ```bash
 container run --rm -it \
-  --env XDG_CONFIG_HOME=/fragua-config \
-  --env GH_CONFIG_DIR=/fragua-gh \
-  --env CLAUDE_CONFIG_DIR=/fragua-claude \
-  --env GIT_CONFIG_GLOBAL=/fragua-config/gitconfig \
   -v fragua-config:/fragua-config:rw \
-  -v fragua-gh:/fragua-gh:rw \
-  -v fragua-claude:/fragua-claude:rw \
-  -v fragua-ssh:/root/.ssh:rw \
+  -v fragua-secrets:/fragua-secrets:rw \
   -v ${HOME}/.ssh:/host-ssh:ro \              # Option A only
   -v ${HOME}/.gitconfig:/host-gitconfig:ro \  # Option A only
   local/fragua:latest bash
 
 # ── inside the container ──────────────────────────────────────────────
+# 0. Create the secret subdirs (the empty volume hides the image's baked dirs)
+mkdir -p /fragua-secrets/gh /fragua-secrets/ssh && chmod 700 /fragua-secrets/ssh
+
 # 1. GitHub CLI — device-code flow works headless (opens a code + URL)
+#    Writes to GH_CONFIG_DIR=/fragua-secrets/gh
 gh auth login
 
-# 2. Git identity + SSH key — do EITHER Option A or Option B:
+# 2. Git identity + SSH key — do EITHER Option A or Option B.
+#    /root/.ssh is a symlink → /fragua-secrets/ssh, so keys land in the volume.
 
 #   ── Option A · reuse host identity + key (copy once) ────────────────
 cp /host-gitconfig /fragua-config/gitconfig
-chmod 700 /root/.ssh
 cp /host-ssh/id_ed25519 /host-ssh/id_ed25519.pub /root/.ssh/   # or id_rsa / id_ecdsa
 chmod 600 /root/.ssh/id_*
 ssh -o IdentitiesOnly=yes -i /root/.ssh/id_ed25519 -T git@github.com   # "Hi <you>!"
@@ -206,7 +216,6 @@ ssh -o IdentitiesOnly=yes -i /root/.ssh/id_ed25519 -T git@github.com   # "Hi <yo
 #   ── Option B · fresh identity + key (must register on GitHub) ───────
 git config --global user.name  "Your Name"
 git config --global user.email "you@example.com"
-chmod 700 /root/.ssh
 ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N "" -C "fragua-container"
 gh auth refresh -h github.com -s admin:public_key      # grant key-management scope
 gh ssh-key add /root/.ssh/id_ed25519.pub --title "fragua-container"   # ← registers it
@@ -230,9 +239,10 @@ exit
 > and commits are attributed to the name/email you set — not your usual host
 > identity. Option A avoids both, since it reuses what's already on your account.
 
-> Everything now lives in volumes: `gh`/`fragua`/`git`/`claude` tokens in
-> `fragua-config`+`fragua-gh`, the SSH key in `fragua-ssh`. The image trusts
-> GitHub's host key via baked-in `known_hosts`, so `git@github.com` never prompts.
+> Everything now lives in volumes: the `fragua`/`git`/`claude` tokens in
+> `fragua-config`, and the `gh` token + SSH key together in `fragua-secrets`. The
+> image trusts GitHub's host key via baked-in `known_hosts`, so `git@github.com`
+> never prompts.
 
 > **Tip — git over HTTPS instead of SSH:** if your repos use `https://github.com`
 > remotes, skip the SSH key entirely and run `gh auth setup-git` in step 1 to
@@ -251,28 +261,30 @@ Every mount is an **internal named volume** — there are **no host paths** and 
 | Source                       | Destination       | Mode             |
 | ---------------------------- | ----------------- | ---------------- |
 | `fragua-config` (named vol)  | `/fragua-config`  | `rw` (internal)  |
-| `fragua-gh` (named vol)      | `/fragua-gh`      | `ro`             |
-| `fragua-ssh` (named vol)     | `/root/.ssh`      | `ro`             |
-| `fragua-claude` (named vol)  | `/fragua-claude`  | `rw` (internal)  |
+| `fragua-secrets` (named vol) | `/fragua-secrets` | `ro`             |
 | `fragua-workdir` (named vol) | `/fragua-workdir` | `rw` (internal)  |
+| `fragua-data` (named vol)    | `/fragua-data`    | `rw` (internal)  |
 
 #### Why these mounts — and what's writable
 
 - **`fragua-config` → `rw` (internal)** — the fragua agent writes its status and
-  a local DB here at runtime, so it must be writable. It also holds the Git
-  identity (`gitconfig`) and the Claude token file (read by the entrypoint — no
-  `--env` needed). It's an internal named volume, so writes never reach your Mac.
-- **`fragua-gh` / `fragua-ssh` → `ro`** — the GitHub CLI token and the SSH key.
+  a local DB here, so it must be writable. It also holds the Git identity
+  (`gitconfig`), the Claude token file (read by the entrypoint — no `--env`
+  needed), and Claude Code's session/project state (`/fragua-config/claude`).
+  Internal named volume, so writes never reach your Mac.
+- **`fragua-secrets` → `ro`** — the GitHub CLI token and the SSH key, together.
   Read-only at runtime: the agent uses them but can't rewrite or corrupt them.
-  (They were `rw` during setup *only* so you could write them.)
-- **`fragua-claude` → `rw` (internal)** — Claude Code writes session history and
-  per-project state on every run, so this one must be writable.
+  (It was `rw` during setup *only* so you could write them.)
 - **`fragua-workdir` → `rw` (internal)** — all agent output (`git clone`,
   `bundle install`, DB files, compiled assets) lands here.
+- **`fragua-data` → `rw` (internal)** — runtime-installed gems + global node
+  modules + their bins, so a `gem install` / `bundle install` / `npm install -g`
+  the agent runs survives a rebuild instead of being re-fetched each time.
 
 > **Key takeaway:** there are no host mounts at all. Every writable target is an
-> **internal named volume** — the agent's config/state and working tree — so
-> writes never reach your Mac. The GitHub token and SSH key stay read-only.
+> **internal named volume** — the agent's config/state, toolchain cache, and
+> working tree — so writes never reach your Mac. The GitHub token and SSH key stay
+> read-only.
 
 ### 4b. Start the container
 
@@ -281,10 +293,9 @@ container run \
   --name fragua-agent \
   --detach \
   -v fragua-config:/fragua-config:rw \
-  -v fragua-gh:/fragua-gh:ro \
-  -v fragua-ssh:/root/.ssh:ro \
-  -v fragua-claude:/fragua-claude:rw \
+  -v fragua-secrets:/fragua-secrets:ro \
   -v fragua-workdir:/fragua-workdir:rw \
+  -v fragua-data:/fragua-data:rw \
   local/fragua:latest
 ```
 
@@ -305,18 +316,21 @@ Project `.mise.toml` files override the global Ruby/Node version automatically.
 container logs --follow fragua-agent
 container exec -it fragua-agent bash      # inspect workdir, run rails cmds
 
-# rebuild — both volumes survive
+# rebuild — all volumes survive
 container exec fragua-agent fragua prune --yes
 container stop fragua-agent && container rm fragua-agent
 container build --no-cache -t local/fragua:latest .
-# re-run 4b — no re-login, workdir data preserved
+# re-run 4b — no re-login, workdir + gem/node cache preserved
 
 # just update the CLIs (Claude Code + fragua) without a full rebuild:
 ./build.sh --refresh-cli    # or: container build --build-arg CLI_REFRESH=$(date +%s) -t local/fragua:latest .
 
+# drop just the runtime gem/node cache (forces a clean re-install, keeps creds)
+container volume delete fragua-data && container volume create fragua-data
+
 # nuclear — wipe everything (forces full re-setup, incl. a new SSH key)
 container rm -f fragua-agent
-container volume delete fragua-workdir fragua-config fragua-gh fragua-claude fragua-ssh
+container volume delete fragua-workdir fragua-config fragua-secrets fragua-data
 ```
 
 ---
@@ -339,13 +353,19 @@ container volume delete fragua-workdir fragua-config fragua-gh fragua-claude fra
   empty. Check `/fragua-config/claude-oauth-token` exists in the `fragua-config`
   volume; the image's entrypoint reads it on every run. (An explicit
   `--env CLAUDE_CODE_OAUTH_TOKEN` overrides the file if you prefer.)
-- **`gh` says "not logged in" at runtime** — the `fragua-gh` volume isn't
+- **`gh` says "not logged in" at runtime** — the `fragua-secrets` volume isn't
   mounted, or it's empty. Re-run the Phase 3c `gh auth login` if needed.
+- **`gh`/`git` can't write at runtime ("read-only file system")** — expected:
+  `fragua-secrets` is `ro` at runtime by design. To rotate the token or key,
+  re-run the Phase 3c setup shell (which mounts it `:rw`).
+- **Runtime `gem install` / `npm i -g` vanished after a rebuild** — confirm the
+  `fragua-data` volume is mounted (Phase 4b). Without it, those installs live in
+  the container's writable layer and are discarded on `rm`.
 - **`git@github.com` push fails "Host key verification failed"** — the image
   seeds `known_hosts` at build time; if you stripped that line, re-add the
   `ssh-keyscan github.com` step or pass `-o StrictHostKeyChecking=accept-new`.
 - **`git` push fails "Permission denied (publickey)"** — the SSH key in
-  `fragua-ssh` isn't registered on GitHub. With **Option B** run `gh ssh-key add`
+  `fragua-secrets` isn't registered on GitHub. With **Option B** run `gh ssh-key add`
   (Phase 3c); with **Option A** make sure you copied a key that's already on your
   account. Test with `ssh -i /root/.ssh/id_ed25519 -T git@github.com`.
 - **SSH key asks for a passphrase / hangs** — a copied **Option A** key has a
@@ -353,3 +373,77 @@ container volume delete fragua-workdir fragua-config fragua-gh fragua-claude fra
   key, or switch to **Option B** (a fresh key with `-N ""`).
 - **`linux/amd64` host can't run the image** — images built on Apple silicon are
   `linux/arm64`; build/publish a matching arch for x86 hosts.
+
+---
+
+## Migrating from the five-volume layout
+
+Older images used five volumes — `fragua-config`, `fragua-gh`, `fragua-ssh`,
+`fragua-claude`, `fragua-workdir`. The current image uses four: `fragua-config`
+(now also holds Claude state under `claude/`), `fragua-secrets` (gh + ssh, `ro` at
+runtime), `fragua-workdir`, and the new `fragua-data`. Migrate in three steps.
+
+### 1. Back up every existing volume to the host
+
+Mount all five old volumes read-only plus the current host directory, and tar each
+one out. Tarballs land in `./fragua-backup/` on your Mac.
+
+```bash
+container run --rm -it \
+  -v fragua-config:/v/config:ro \
+  -v fragua-gh:/v/gh:ro \
+  -v fragua-ssh:/v/ssh:ro \
+  -v fragua-claude:/v/claude:ro \
+  -v fragua-workdir:/v/workdir:ro \
+  -v "$PWD":/backup:rw \
+  local/fragua:latest bash -c '
+    mkdir -p /backup/fragua-backup
+    for v in config gh ssh claude workdir; do
+      tar czf /backup/fragua-backup/$v.tgz -C /v/$v . ;
+    done
+    ls -la /backup/fragua-backup'
+```
+
+Confirm `config.tgz`, `gh.tgz`, `ssh.tgz`, `claude.tgz` exist and are non-empty
+before continuing. (`workdir.tgz` may be large; the agent re-clones, so it's
+optional to keep.)
+
+### 2. Build the new image + create the new volumes
+
+```bash
+./build.sh --no-push                       # or: container build -t local/fragua:latest .
+container volume create fragua-config
+container volume create fragua-secrets
+container volume create fragua-workdir
+container volume create fragua-data
+```
+
+> If you'd rather start the new `fragua-config` clean, skip the restore below and
+> just re-run the Phase 3c setup. The restore only saves you re-doing the logins.
+
+### 3. Restore the backup into the new layout
+
+`gh` and `claude` move into subdirectories; everything else keeps its place.
+
+```bash
+container run --rm -it \
+  -v fragua-config:/fragua-config:rw \
+  -v fragua-secrets:/fragua-secrets:rw \
+  -v "$PWD/fragua-backup":/backup:ro \
+  local/fragua:latest bash -c '
+    tar xzf /backup/config.tgz -C /fragua-config
+    mkdir -p /fragua-config/claude /fragua-secrets/gh /fragua-secrets/ssh
+    tar xzf /backup/claude.tgz -C /fragua-config/claude
+    tar xzf /backup/gh.tgz     -C /fragua-secrets/gh
+    tar xzf /backup/ssh.tgz    -C /fragua-secrets/ssh
+    chmod 700 /fragua-secrets/ssh
+    chmod 600 /fragua-secrets/ssh/id_* 2>/dev/null || true'
+```
+
+Then start the agent normally (Phase 4b). `fragua-data` stays empty — gems and node
+modules re-install on first use and persist from then on. Once the agent is online
+and `git push` works, you can delete the old volumes:
+
+```bash
+container volume delete fragua-gh fragua-ssh fragua-claude
+```

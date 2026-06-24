@@ -8,11 +8,13 @@ ENV container=container
 ENV DEBIAN_FRONTEND=noninteractive
 ENV XDG_CONFIG_HOME=/fragua-config
 ENV FRAGUA_WORKDIR=/fragua-workdir
-# Per-tool config dirs → each persisted in its own named volume.
-# gh and claude store tokens in plaintext files on Linux, so a volume keeps them.
-ENV GH_CONFIG_DIR=/fragua-gh
+# Per-tool config dirs, consolidated into two volumes by mount mode:
+#   • /fragua-config  (rw)  — fragua + git + claude state/token
+#   • /fragua-secrets (ro at runtime) — gh + ssh, the credentials the agent uses
+#     but must not overwrite. gh and ssh store secrets in plaintext on Linux.
+ENV GH_CONFIG_DIR=/fragua-secrets/gh
 ENV GH_NO_UPDATE_NOTIFIER=1
-ENV CLAUDE_CONFIG_DIR=/fragua-claude
+ENV CLAUDE_CONFIG_DIR=/fragua-config/claude
 # Git reads its global config from here → persisted in the fragua-config volume,
 # so identity is set once in-container instead of bind-mounting host ~/.gitconfig.
 ENV GIT_CONFIG_GLOBAL=/fragua-config/gitconfig
@@ -147,13 +149,27 @@ RUN echo "cli refresh=${CLI_REFRESH}" \
 RUN curl -fsSL \
     https://github.com/maquina-app/fragua-tools/releases/latest/download/install.sh | sh
 
-RUN mkdir -p /fragua-config /fragua-gh /fragua-claude /fragua-workdir /root/.ssh \
-    && chmod 700 /root/.ssh
+# Config/secret dirs, plus the runtime-toolchain volume mountpoint. The agent's
+# own SSH dir is a symlink into the (read-only at runtime) secrets volume, so the
+# key lives beside the gh token and the agent can use but not overwrite it.
+RUN mkdir -p \
+        /fragua-config /fragua-config/claude \
+        /fragua-secrets/gh /fragua-secrets/ssh \
+        /fragua-workdir \
+        /fragua-data/gems /fragua-data/npm \
+    && rm -rf /root/.ssh \
+    && ln -s /fragua-secrets/ssh /root/.ssh \
+    && chmod 700 /fragua-secrets/ssh
 
-# ── Entrypoint — load the Claude token from the config volume if present ───────
-# Set CLAUDE_CODE_OAUTH_TOKEN once (write it into the fragua-config volume during
-# setup) and the agent picks it up on every run — no --env needed. An explicit
-# --env CLAUDE_CODE_OAUTH_TOKEN still wins if you'd rather pass it at runtime.
+# ── Entrypoint — load the Claude token + wire the runtime-toolchain volume ─────
+# 1. Claude token: write it into the fragua-config volume once during setup and
+#    the agent picks it up on every run — no --env needed. An explicit
+#    --env CLAUDE_CODE_OAUTH_TOKEN still wins if you'd rather pass it at runtime.
+# 2. Toolchain redirect: point gem/npm installs at the rw /fragua-data volume so
+#    runtime `gem install` / `bundle install` / `npm install -g` survive a
+#    rebuild. This is set HERE (runtime), not as a build ENV — otherwise the
+#    build-time installs above would target a path the empty volume later hides,
+#    and `--refresh-cli` could not refresh them.
 RUN cat > /usr/local/bin/fragua-entrypoint.sh <<'EOF'
 #!/bin/sh
 set -e
@@ -161,20 +177,35 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -r /fragua-config/claude-oauth-tok
   CLAUDE_CODE_OAUTH_TOKEN="$(cat /fragua-config/claude-oauth-token)"
   export CLAUDE_CODE_OAUTH_TOKEN
 fi
+mkdir -p /fragua-data/gems /fragua-data/npm 2>/dev/null || true
+export GEM_HOME=/fragua-data/gems
+export GEM_PATH="${GEM_HOME}:$(ruby -e 'print Gem.default_dir' 2>/dev/null)"
+export NPM_CONFIG_PREFIX=/fragua-data/npm
+export PATH="/fragua-data/gems/bin:/fragua-data/npm/bin:${PATH}"
 exec "$@"
 EOF
 RUN chmod +x /usr/local/bin/fragua-entrypoint.sh
 
-# Also export the token for login shells (e.g. `exec ... bash -l`), so the token
-# is present even when the entrypoint is bypassed.
-RUN cat > /etc/profile.d/fragua-claude-token.sh <<'EOF'
+# Replicate the same exports for shells that bypass the entrypoint — login shells
+# (`exec ... bash -l`, /etc/profile.d) and non-login interactive bash
+# (`exec ... bash`, /etc/bash.bashrc) — so the token + toolchain paths are present.
+RUN cat > /etc/profile.d/fragua-runtime.sh <<'EOF'
 if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -r /fragua-config/claude-oauth-token ]; then
   export CLAUDE_CODE_OAUTH_TOKEN="$(cat /fragua-config/claude-oauth-token)"
 fi
+export GEM_HOME=/fragua-data/gems
+export GEM_PATH="${GEM_HOME}:$(ruby -e 'print Gem.default_dir' 2>/dev/null)"
+export NPM_CONFIG_PREFIX=/fragua-data/npm
+export PATH="/fragua-data/gems/bin:/fragua-data/npm/bin:${PATH}"
 EOF
 
-# ...and for non-login interactive bash (e.g. `exec ... bash`).
-RUN echo '[ -r /fragua-config/claude-oauth-token ] && export CLAUDE_CODE_OAUTH_TOKEN="$(cat /fragua-config/claude-oauth-token)"' >> /etc/bash.bashrc
+RUN { \
+      echo '[ -r /fragua-config/claude-oauth-token ] && export CLAUDE_CODE_OAUTH_TOKEN="$(cat /fragua-config/claude-oauth-token)"'; \
+      echo 'export GEM_HOME=/fragua-data/gems'; \
+      echo 'export GEM_PATH="${GEM_HOME}:$(ruby -e '"'"'print Gem.default_dir'"'"' 2>/dev/null)"'; \
+      echo 'export NPM_CONFIG_PREFIX=/fragua-data/npm'; \
+      echo 'export PATH="/fragua-data/gems/bin:/fragua-data/npm/bin:${PATH}"'; \
+    } >> /etc/bash.bashrc
 
 ENTRYPOINT ["/usr/local/bin/fragua-entrypoint.sh"]
 CMD ["fragua", "agent", "--workdir", "/fragua-workdir"]

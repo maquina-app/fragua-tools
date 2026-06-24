@@ -1,6 +1,16 @@
 # Scratch / working files
 tmp/
 
+# Local Claude Code config
+.claude/*
+
+# Volume backups — contain the gh token + SSH private key in plaintext. Never commit.
+fragua-backup/
+**/fragua-backup/
+
+# Local launcher script
+fragua-host
+
 # Local-only maintainer docs (e.g. RELEASING.local.md)
 *.local.md
 
