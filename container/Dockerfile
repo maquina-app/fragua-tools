@@ -156,10 +156,59 @@ RUN mkdir -p \
         /fragua-config /fragua-config/claude \
         /fragua-secrets/gh /fragua-secrets/ssh \
         /fragua-workdir \
-        /fragua-data/gems /fragua-data/npm \
+        /fragua-data/gems /fragua-data/npm /fragua-data/bin \
     && rm -rf /root/.ssh \
     && ln -s /fragua-secrets/ssh /root/.ssh \
     && chmod 700 /fragua-secrets/ssh
+
+# ── Runtime CLI refresh — install/update Claude Code + fragua into the volume ──
+# The build-time installs above are an offline baseline; this script puts fresh
+# copies in the rw /fragua-data volume (first on PATH) so the CLIs can be updated
+# from a running container with no image rebuild. The entrypoint runs it with
+# --if-missing on first boot; run it by hand to force an update:
+#   container exec <name> fragua-refresh-cli
+RUN cat > /usr/local/bin/fragua-refresh-cli <<'EOF'
+#!/bin/sh
+# Install/update the Fragua + Claude Code CLIs into the persistent
+# /fragua-data volume so updates need no image rebuild.
+#   fragua-refresh-cli                 # force-update both to latest
+#   fragua-refresh-cli --if-missing    # install only those absent (used by entrypoint)
+#   fragua-refresh-cli claude|fragua   # restrict to one CLI
+set -e
+MODE=all; ONLY=""
+for a in "$@"; do
+  case "$a" in
+    --if-missing) MODE=if-missing ;;
+    claude|fragua) ONLY="$a" ;;
+    *) echo "usage: fragua-refresh-cli [--if-missing] [claude|fragua]" >&2; exit 1 ;;
+  esac
+done
+export NPM_CONFIG_PREFIX=/fragua-data/npm
+mkdir -p /fragua-data/npm /fragua-data/bin
+
+want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
+
+if want claude; then
+  if [ "$MODE" = all ] || ! [ -x /fragua-data/npm/bin/claude ]; then
+    echo "==> installing Claude Code into /fragua-data/npm"
+    npm install -g @anthropic-ai/claude-code
+  fi
+fi
+
+if want fragua; then
+  if [ "$MODE" = all ] || ! [ -x /fragua-data/bin/fragua ]; then
+    echo "==> installing Fragua CLI into /fragua-data/bin"
+    # install.sh has no install-dir override; it writes /usr/local/bin/fragua as
+    # root, so run it then relocate the binary into the volume.
+    curl -fsSL https://github.com/maquina-app/fragua-tools/releases/latest/download/install.sh | sh
+    install -D -m 0755 "$(command -v fragua)" /fragua-data/bin/fragua
+  fi
+fi
+echo "==> CLIs:"
+command -v fragua && fragua --version 2>/dev/null || true
+command -v claude && claude --version 2>/dev/null || true
+EOF
+RUN chmod +x /usr/local/bin/fragua-refresh-cli
 
 # ── Entrypoint — load the Claude token + wire the runtime-toolchain volume ─────
 # 1. Claude token: write it into the fragua-config volume once during setup and
@@ -177,11 +226,12 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -r /fragua-config/claude-oauth-tok
   CLAUDE_CODE_OAUTH_TOKEN="$(cat /fragua-config/claude-oauth-token)"
   export CLAUDE_CODE_OAUTH_TOKEN
 fi
-mkdir -p /fragua-data/gems /fragua-data/npm 2>/dev/null || true
+mkdir -p /fragua-data/gems /fragua-data/npm /fragua-data/bin 2>/dev/null || true
 export GEM_HOME=/fragua-data/gems
 export GEM_PATH="${GEM_HOME}:$(ruby -e 'print Gem.default_dir' 2>/dev/null)"
 export NPM_CONFIG_PREFIX=/fragua-data/npm
-export PATH="/fragua-data/gems/bin:/fragua-data/npm/bin:${PATH}"
+export PATH="/fragua-data/gems/bin:/fragua-data/npm/bin:/fragua-data/bin:${PATH}"
+fragua-refresh-cli --if-missing || echo "warn: CLI bootstrap skipped (using image baseline)" >&2
 exec "$@"
 EOF
 RUN chmod +x /usr/local/bin/fragua-entrypoint.sh
@@ -196,7 +246,7 @@ fi
 export GEM_HOME=/fragua-data/gems
 export GEM_PATH="${GEM_HOME}:$(ruby -e 'print Gem.default_dir' 2>/dev/null)"
 export NPM_CONFIG_PREFIX=/fragua-data/npm
-export PATH="/fragua-data/gems/bin:/fragua-data/npm/bin:${PATH}"
+export PATH="/fragua-data/gems/bin:/fragua-data/npm/bin:/fragua-data/bin:${PATH}"
 EOF
 
 RUN { \
@@ -204,7 +254,7 @@ RUN { \
       echo 'export GEM_HOME=/fragua-data/gems'; \
       echo 'export GEM_PATH="${GEM_HOME}:$(ruby -e '"'"'print Gem.default_dir'"'"' 2>/dev/null)"'; \
       echo 'export NPM_CONFIG_PREFIX=/fragua-data/npm'; \
-      echo 'export PATH="/fragua-data/gems/bin:/fragua-data/npm/bin:${PATH}"'; \
+      echo 'export PATH="/fragua-data/gems/bin:/fragua-data/npm/bin:/fragua-data/bin:${PATH}"'; \
     } >> /etc/bash.bashrc
 
 ENTRYPOINT ["/usr/local/bin/fragua-entrypoint.sh"]

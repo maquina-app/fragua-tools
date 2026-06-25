@@ -101,7 +101,7 @@ host action is generating the Claude token once (it needs a browser).
 docker volume create fragua-config     # fragua token, git identity, claude token + state → /fragua-config
 docker volume create fragua-secrets    # gh token + SSH keypair → /fragua-secrets (ro at runtime)
 docker volume create fragua-workdir    # agent work             → /fragua-workdir (FRAGUA_WORKDIR)
-docker volume create fragua-data       # runtime gems + node modules + bins → /fragua-data
+docker volume create fragua-data       # claude + fragua CLIs, runtime gems + node modules → /fragua-data
 
 # confirm all four exist before running the agent
 docker volume ls | grep fragua
@@ -112,7 +112,7 @@ docker volume ls | grep fragua
 | `fragua-config`  | `/fragua-config`  | `rw`         | fragua token + status/DB, `gitconfig` (`GIT_CONFIG_GLOBAL`), claude token + state (`CLAUDE_CONFIG_DIR=/fragua-config/claude`) |
 | `fragua-secrets` | `/fragua-secrets` | `ro`*        | gh token (`GH_CONFIG_DIR=/fragua-secrets/gh`) + SSH keypair (`/root/.ssh` → `/fragua-secrets/ssh`) |
 | `fragua-workdir` | `/fragua-workdir` | `rw`         | clones, `bundle install`, DBs, assets (`FRAGUA_WORKDIR`) |
-| `fragua-data`    | `/fragua-data`    | `rw`         | runtime `gem install` / `bundle install` / `npm install -g` output (`GEM_HOME`, `NPM_CONFIG_PREFIX`) |
+| `fragua-data`    | `/fragua-data`    | `rw`         | `claude` + `fragua` CLIs (installed on first boot), plus runtime `gem install` / `bundle install` / `npm install -g` output (`GEM_HOME`, `NPM_CONFIG_PREFIX`) |
 
 \* `fragua-secrets` is mounted **`rw` during the one-time setup below** (so you can
 write the gh token + SSH key) and **`ro` for every normal run** — the agent uses
@@ -249,9 +249,11 @@ SSH-agent forwarding. The running agent is fully decoupled from your Mac.
   (It was `rw` during setup *only* so you could write them.)
 - **`fragua-workdir` → `rw` (internal)** — all agent output (`git clone`,
   `bundle install`, DB files, compiled assets) lands here.
-- **`fragua-data` → `rw` (internal)** — runtime-installed gems + global node
-  modules + their bins, so a `gem install` / `bundle install` / `npm install -g`
-  the agent runs survives a rebuild instead of being re-fetched each time.
+- **`fragua-data` → `rw` (internal)** — the `claude` + `fragua` CLIs (installed
+  on first boot, updatable via `fragua-refresh-cli` — see Lifecycle), plus
+  runtime-installed gems + global node modules + their bins, so a `gem install` /
+  `bundle install` / `npm install -g` the agent runs survives a rebuild instead
+  of being re-fetched each time.
 
 > **Key takeaway:** there are no host mounts at all. Every writable target is an
 > **internal named volume**, so writes never reach your Mac. The GitHub token and
@@ -297,13 +299,14 @@ docker compose down
 docker build --no-cache -t local/fragua:latest .
 docker compose up -d
 
-# just update the CLIs (Claude Code + fragua) without a full rebuild:
-./build.sh --refresh-cli    # or: docker build --build-arg CLI_REFRESH=$(date +%s) -t local/fragua:latest .
+# update the CLIs (Claude Code + fragua) a running agent uses — no rebuild:
+docker compose exec fragua-agent fragua-refresh-cli           # both (or: claude / fragua)
+# (refresh only the image's offline baseline instead: ./build.sh --refresh-cli)
 
 # inspect the workdir without touching the running agent
 docker run --rm -v fragua-workdir:/data:ro alpine ls -la /data
 
-# drop just the runtime gem/node cache (forces a clean re-install, keeps creds)
+# drop the runtime gem/node cache + CLIs (re-bootstrapped on next start, keeps creds)
 docker volume rm fragua-data && docker volume create fragua-data
 
 # nuclear — wipes all work + every credential (forces full re-setup, incl. SSH key)
@@ -424,8 +427,9 @@ docker run --rm -it \
     chmod 600 /fragua-secrets/ssh/id_* 2>/dev/null || true'
 ```
 
-Then start the agent normally (Phase 4b). `fragua-data` stays empty — gems and node
-modules re-install on first use and persist from then on.
+Then start the agent normally (Phase 4b). `fragua-data` starts empty — the
+`claude` + `fragua` CLIs are installed on first boot, and gems / node modules
+re-install on first use; all of it persists from then on.
 
 > If `gh` reports "not authenticated" after the restore, the backed-up `hosts.yml`
 > was written by an older `gh` schema. Just re-run the login in a `--bash` session:

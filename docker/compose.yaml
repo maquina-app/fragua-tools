@@ -33,7 +33,7 @@ services:
       - fragua-config:/fragua-config:rw     # fragua status/DB, git identity, claude token + state
       - fragua-secrets:/fragua-secrets:ro   # gh token + SSH key (read-only at runtime)
       - fragua-workdir:/fragua-workdir:rw   # agent working tree
-      - fragua-data:/fragua-data:rw         # runtime-installed gems + node modules + bins
+      - fragua-data:/fragua-data:rw         # claude + fragua CLIs, runtime gems + node modules
     restart: unless-stopped
 
 volumes:

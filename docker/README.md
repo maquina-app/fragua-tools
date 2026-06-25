@@ -56,7 +56,7 @@ across rebuilds and `docker compose down`. This is necessary because on macOS
 | `fragua-config`  | `/fragua-config`  | `rw` | fragua token + status/DB, Git identity (`gitconfig`), Claude token + session state (`XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, `CLAUDE_CONFIG_DIR=/fragua-config/claude`) |
 | `fragua-secrets` | `/fragua-secrets` | `ro` | GitHub CLI token (`GH_CONFIG_DIR=/fragua-secrets/gh`) + the container's SSH keypair (`/root/.ssh` → `/fragua-secrets/ssh`). Mounted `rw` only during setup. |
 | `fragua-workdir` | `/fragua-workdir` | `rw` | Agent working tree — clones, `bundle install`, DBs, assets (`FRAGUA_WORKDIR`) |
-| `fragua-data`    | `/fragua-data`    | `rw` | Runtime-installed gems + global node modules + bins (`GEM_HOME=/fragua-data/gems`, `NPM_CONFIG_PREFIX=/fragua-data/npm`) — so agent installs survive a rebuild |
+| `fragua-data`    | `/fragua-data`    | `rw` | The active `claude` (`/fragua-data/npm/bin`) and `fragua` (`/fragua-data/bin`) CLIs, plus runtime-installed gems + global node modules (`GEM_HOME=/fragua-data/gems`, `NPM_CONFIG_PREFIX=/fragua-data/npm`) — so CLI updates and agent installs survive a rebuild |
 
 Create them once:
 
@@ -71,15 +71,36 @@ docker volume create fragua-data
 token + SSH **private** key), so it's mounted **read-only at runtime** — and `rw`
 only during the one-time setup that writes them. `fragua-data` persists everything
 the agent installs at runtime (`gem install`, `bundle install`, `npm install -g`),
-which otherwise lives in the container's writable layer and is lost on rebuild;
-the build-time toolchain (Ruby, Node, Rails, Claude Code, fragua) stays in the
-image so `--refresh-cli` still updates it.
+which otherwise lives in the container's writable layer and is lost on rebuild.
+The `claude` and `fragua` CLIs also live here: the entrypoint installs them on
+first boot and they take precedence over the image's baseline copies, so you can
+update them from a running container without a rebuild (see
+[Updating the CLIs](#updating-the-clis-without-a-rebuild)). The heavy build-time
+toolchain (Ruby, Node, Rails, native libraries) stays in the image.
 
 During the one-time setup you choose whether to **reuse your existing host SSH
 key + Git identity** or **generate a fresh one** for the container (a new key
 must be registered on GitHub). The Claude token is generated on the host once
 (`claude setup-token`) and written into `fragua-config`; the image's entrypoint
 loads it on every run. See the guide for the exact steps.
+
+## Updating the CLIs without a rebuild
+
+The `claude` and `fragua` CLIs live in the `fragua-data` volume and take
+precedence over the baseline copies baked into the image. The entrypoint
+installs them on **first boot** if missing, so a fresh volume bootstraps itself
+(this needs network access; if it fails, the image baseline is used and a warning
+is logged). To pull the latest versions into a running container — no rebuild:
+
+```bash
+docker compose exec fragua-agent fragua-refresh-cli            # update both
+docker compose exec fragua-agent fragua-refresh-cli claude     # just Claude Code
+docker compose exec fragua-agent fragua-refresh-cli fragua     # just fragua
+```
+
+Wiping the `fragua-data` volume re-bootstraps the CLIs on the next start. The
+build-time `--refresh-cli` flag (below) is now only needed to refresh the image's
+offline baseline.
 
 ## Building & publishing
 
@@ -104,8 +125,11 @@ to GHCR by default.
 ```
 
 > `--refresh-cli` busts only the Claude Code + fragua install layers (and the
-> cheap ones after), so you get the newest CLIs without the ~10–15 min full
-> rebuild. Under the hood it passes `--build-arg CLI_REFRESH=$(date +%s)`.
+> cheap ones after), so you get the newest CLIs in the image's offline baseline
+> without the ~10–15 min full rebuild. Under the hood it passes
+> `--build-arg CLI_REFRESH=$(date +%s)`. For the common case — updating the CLIs
+> a running agent actually uses — prefer `fragua-refresh-cli` (see
+> [Updating the CLIs](#updating-the-clis-without-a-rebuild)); no rebuild needed.
 
 ### Authentication
 

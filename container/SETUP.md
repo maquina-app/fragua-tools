@@ -129,7 +129,7 @@ is generating the Claude token once (it needs a browser).
 container volume create fragua-config     # fragua token, git identity, claude token + state → /fragua-config
 container volume create fragua-secrets    # gh token + SSH keypair → /fragua-secrets (ro at runtime)
 container volume create fragua-workdir    # agent work             → /fragua-workdir (FRAGUA_WORKDIR)
-container volume create fragua-data       # runtime gems + node modules + bins → /fragua-data
+container volume create fragua-data       # claude + fragua CLIs, runtime gems + node modules → /fragua-data
 
 # confirm all four exist before running the agent
 container volume list
@@ -140,7 +140,7 @@ container volume list
 | `fragua-config`  | `/fragua-config`  | `rw`         | fragua token + status/DB, `gitconfig` (`GIT_CONFIG_GLOBAL`), claude token + state (`CLAUDE_CONFIG_DIR=/fragua-config/claude`) |
 | `fragua-secrets` | `/fragua-secrets` | `ro`*        | gh token (`GH_CONFIG_DIR=/fragua-secrets/gh`) + SSH keypair (`/root/.ssh` → `/fragua-secrets/ssh`) |
 | `fragua-workdir` | `/fragua-workdir` | `rw`         | clones, `bundle install`, DBs, assets (`FRAGUA_WORKDIR`) |
-| `fragua-data`    | `/fragua-data`    | `rw`         | runtime `gem install` / `bundle install` / `npm install -g` output (`GEM_HOME`, `NPM_CONFIG_PREFIX`) |
+| `fragua-data`    | `/fragua-data`    | `rw`         | `claude` + `fragua` CLIs (installed on first boot), plus runtime `gem install` / `bundle install` / `npm install -g` output (`GEM_HOME`, `NPM_CONFIG_PREFIX`) |
 
 \* `fragua-secrets` is mounted **`rw` during the one-time setup below** (so you can
 write the gh token + SSH key) and **`ro` for every normal run** — the agent uses
@@ -279,9 +279,11 @@ Every mount is an **internal named volume** — there are **no host paths** and 
   (It was `rw` during setup *only* so you could write them.)
 - **`fragua-workdir` → `rw` (internal)** — all agent output (`git clone`,
   `bundle install`, DB files, compiled assets) lands here.
-- **`fragua-data` → `rw` (internal)** — runtime-installed gems + global node
-  modules + their bins, so a `gem install` / `bundle install` / `npm install -g`
-  the agent runs survives a rebuild instead of being re-fetched each time.
+- **`fragua-data` → `rw` (internal)** — the `claude` + `fragua` CLIs (installed
+  on first boot, updatable via `fragua-refresh-cli` — see Lifecycle), plus
+  runtime-installed gems + global node modules + their bins, so a `gem install` /
+  `bundle install` / `npm install -g` the agent runs survives a rebuild instead
+  of being re-fetched each time.
 
 > **Key takeaway:** there are no host mounts at all. Every writable target is an
 > **internal named volume** — the agent's config/state, toolchain cache, and
@@ -324,10 +326,11 @@ container stop fragua-agent && container rm fragua-agent
 container build --no-cache -t local/fragua:latest .
 # re-run 4b — no re-login, workdir + gem/node cache preserved
 
-# just update the CLIs (Claude Code + fragua) without a full rebuild:
-./build.sh --refresh-cli    # or: container build --build-arg CLI_REFRESH=$(date +%s) -t local/fragua:latest .
+# update the CLIs (Claude Code + fragua) a running agent uses — no rebuild:
+container exec fragua-agent fragua-refresh-cli           # both (or: claude / fragua)
+# (refresh only the image's offline baseline instead: ./build.sh --refresh-cli)
 
-# drop just the runtime gem/node cache (forces a clean re-install, keeps creds)
+# drop the runtime gem/node cache + CLIs (re-bootstrapped on next start, keeps creds)
 container volume delete fragua-data && container volume create fragua-data
 
 # nuclear — wipe everything (forces full re-setup, incl. a new SSH key)
@@ -449,8 +452,9 @@ container run --rm -it \
     chmod 600 /fragua-secrets/ssh/id_* 2>/dev/null || true'
 ```
 
-Then start the agent normally (Phase 4b). `fragua-data` stays empty — gems and node
-modules re-install on first use and persist from then on.
+Then start the agent normally (Phase 4b). `fragua-data` starts empty — the
+`claude` + `fragua` CLIs are installed on first boot, and gems / node modules
+re-install on first use; all of it persists from then on.
 
 > If `gh` reports "not authenticated" after the restore, the backed-up `hosts.yml`
 > was written by an older `gh` schema (and this image prefers a keyring anyway).
