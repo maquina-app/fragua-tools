@@ -14,6 +14,12 @@ ENV FRAGUA_WORKDIR=/fragua-workdir
 ENV GH_CONFIG_DIR=/fragua-secrets/gh
 ENV GH_NO_UPDATE_NOTIFIER=1
 ENV CLAUDE_CONFIG_DIR=/fragua-config/claude
+# This image runs as root by design (isolated container, no host mounts at
+# runtime, isolated named volumes). Claude Code refuses
+# --dangerously-skip-permissions as root unless it detects a recognized sandbox;
+# IS_SANDBOX=1 is that signal, so the agent can run unattended. Set as ENV so it
+# reaches the entrypoint/CMD, interactive shells, and `docker exec` alike.
+ENV IS_SANDBOX=1
 # Git reads its global config from here → persisted in the fragua-config volume,
 # so identity is set once in-container instead of bind-mounting host ~/.gitconfig.
 ENV GIT_CONFIG_GLOBAL=/fragua-config/gitconfig

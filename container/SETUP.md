@@ -371,6 +371,12 @@ container volume delete fragua-workdir fragua-config fragua-secrets fragua-data
   empty. Check `/fragua-config/claude-oauth-token` exists in the `fragua-config`
   volume; the image's entrypoint reads it on every run. (An explicit
   `--env CLAUDE_CODE_OAUTH_TOKEN` overrides the file if you prefer.)
+- **`--dangerously-skip-permissions cannot be used with root/sudo privileges`** —
+  Claude Code blocks that flag as root unless it detects a recognized sandbox. The
+  image runs as root by design and sets `IS_SANDBOX=1` (a `Dockerfile` `ENV`, so it
+  reaches the entrypoint, shells, and `container exec`) to signal the isolated
+  container. If you hit this, you're on an older image built before that env var —
+  rebuild, or set `IS_SANDBOX=1` in the environment when invoking `claude`.
 - **`gh` says "not logged in" at runtime** — the `fragua-secrets` volume isn't
   mounted, or it's empty. Re-run the Phase 3c `gh auth login --insecure-storage`.
 - **`gh` asks you to authenticate on every run / the token never persists** — this
