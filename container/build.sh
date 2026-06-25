@@ -2,6 +2,9 @@
 #
 # Build the Fragua agent image and (optionally) push it to GHCR.
 #
+# The build is also tagged `local/fragua:latest` (LOCAL_TAG) — the name
+# fragua-host / the run docs use — so a rebuild is immediately what they run.
+#
 # Usage:
 #   ./build.sh                 # build + push  ghcr.io/maquina-app/fragua-container:latest
 #   ./build.sh --no-push       # build only, no registry push
@@ -25,6 +28,10 @@ TAG="${TAG:-latest}"
 ENGINE="${ENGINE:-container}"   # `container` (Apple) or `docker`
 
 REF="${REGISTRY}/${IMAGE}:${TAG}"
+
+# Local builds are also tagged with the name fragua-host / the run docs use, so a
+# rebuild is immediately what they use (no manual retag). Set empty to skip.
+LOCAL_TAG="${LOCAL_TAG:-local/fragua:latest}"
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 PUSH=1
@@ -53,6 +60,15 @@ fi
 # ── Build ─────────────────────────────────────────────────────────────────────
 echo "==> Building ${REF} with '${ENGINE}'"
 "$ENGINE" build $NO_CACHE $REFRESH_ARG -t "$REF" .
+
+# Point the local run name at this fresh build (fragua-host / run docs use it).
+# `docker tag` and `container image tag` differ; try both, don't fail the build.
+if [[ -n "$LOCAL_TAG" && "$LOCAL_TAG" != "$REF" ]]; then
+  echo "==> Tagging ${REF} as ${LOCAL_TAG}"
+  "$ENGINE" tag "$REF" "$LOCAL_TAG" 2>/dev/null \
+    || "$ENGINE" image tag "$REF" "$LOCAL_TAG" 2>/dev/null \
+    || echo "warn: could not tag ${LOCAL_TAG}; run '${ENGINE} ... tag ${REF} ${LOCAL_TAG}' manually" >&2
+fi
 
 if [[ "$PUSH" -eq 0 ]]; then
   echo "==> Built ${REF} (push skipped)"

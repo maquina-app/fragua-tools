@@ -82,9 +82,11 @@ docker build -t local/fragua:latest .
 The first build takes **~10–15 min** — the native-library layer is large.
 Cached rebuilds are fast.
 
-> If you built via `build.sh`, also tag it as `local/fragua:latest` (the name
-> the guide and `compose.yaml` use):
-> `docker tag ghcr.io/maquina-app/fragua-docker:latest local/fragua:latest`
+> `build.sh` already tags the result `local/fragua:latest` (the name this guide
+> and `compose.yaml` use), so no manual `docker tag` is needed. If you ever
+> rebuild while the agent is running, recreate the container so it adopts the new
+> image — `docker compose up -d --force-recreate` (a plain `up -d`/`start` keeps
+> the old one).
 
 ---
 
@@ -175,6 +177,12 @@ mkdir -p /fragua-secrets/gh /fragua-secrets/ssh && chmod 700 /fragua-secrets/ssh
 #    --insecure-storage forces the token into GH_CONFIG_DIR=/fragua-secrets/gh on
 #    the volume; without it gh may save to an in-VM keyring that doesn't persist.
 gh auth login --insecure-storage
+
+# 1b. Let git authenticate over HTTPS using the gh token (writes a credential
+#     helper into the persisted /fragua-config/gitconfig). Without this, HTTPS
+#     clones/pushes fail with "could not read Username for https://github.com";
+#     SSH-protocol git works regardless.
+gh auth setup-git
 
 # 2. Git identity + SSH key — do EITHER Option A or Option B.
 #    /root/.ssh is a symlink → /fragua-secrets/ssh, so keys land in the volume.
@@ -334,6 +342,11 @@ docker volume rm fragua-workdir fragua-config fragua-secrets fragua-data
 - **`git@github.com` push fails "Host key verification failed"** — the image
   seeds `known_hosts` at build time; if you stripped that line, re-add the
   `ssh-keyscan github.com` step or pass `-o StrictHostKeyChecking=accept-new`.
+- **HTTPS git fails "could not read Username for `https://github.com`"** — no git
+  credential helper is wired to the gh token (the agent was set up SSH-only).
+  Run `gh auth setup-git` once inside the container; it writes the helper into
+  `/fragua-config/gitconfig` (rw) and persists. Verify with
+  `printf 'protocol=https\nhost=github.com\n\n' | git credential fill`.
 - **`claude` `/login` fails with "Invalid OAuth Request / Unknown scope"** — the
   browser redirect flow can't complete in a headless container. Use
   `claude setup-token` on your Mac and write the result to
@@ -356,6 +369,15 @@ docker volume rm fragua-workdir fragua-config fragua-secrets fragua-data
 - **Runtime `gem install` / `npm i -g` vanished after a rebuild** — confirm the
   `fragua-data` volume is mounted (Phase 4). Without it, those installs live in the
   container's writable layer and are discarded on `down`/`rm`.
+- **Rebuilt with a newer `fragua`/`claude` but the agent still runs the old version**
+  — the CLIs run from the `fragua-data` volume, which is first on PATH and persists
+  across rebuilds, so the image's newer copy was being shadowed. On boot the
+  entrypoint now runs `fragua-refresh-cli --promote`, which copies the image baseline
+  into the volume whenever the image ships a **newer** version — so the version bump
+  is adopted automatically once a *new container* runs that entrypoint. A plain
+  `up -d`/`start` reuses the old container (old entrypoint run), so recreate it after
+  a rebuild: `docker compose up -d --force-recreate`. To update without a rebuild,
+  force a network pull: `docker compose exec fragua-agent fragua-refresh-cli`.
 - **Agent doesn't appear online** — confirm `fragua login` succeeded inside the
   container (Phase 3c) and that the `fragua-config` volume is mounted in Phase 4.
 - **`linux/amd64` host can't run an arm64 image** — publish a multi-arch image

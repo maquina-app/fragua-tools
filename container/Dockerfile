@@ -161,50 +161,102 @@ RUN mkdir -p \
     && ln -s /fragua-secrets/ssh /root/.ssh \
     && chmod 700 /fragua-secrets/ssh
 
-# ── Runtime CLI refresh — install/update Claude Code + fragua into the volume ──
-# The build-time installs above are an offline baseline; this script puts fresh
-# copies in the rw /fragua-data volume (first on PATH) so the CLIs can be updated
-# from a running container with no image rebuild. The entrypoint runs it with
-# --if-missing on first boot; run it by hand to force an update:
+# ── Runtime CLI refresh — keep Claude Code + fragua current in the volume ──────
+# The build-time installs above are an offline baseline under /usr/local. This
+# script maintains the copies in the rw /fragua-data volume (first on PATH, so
+# they are what actually run). The entrypoint runs it with --promote on every
+# boot: it copies the image baseline into the volume whenever the image ships a
+# NEWER version (so a rebuild is adopted automatically) without clobbering a
+# still-newer copy fetched at runtime. Force a network update to latest with:
 #   container exec <name> fragua-refresh-cli
 RUN cat > /usr/local/bin/fragua-refresh-cli <<'EOF'
 #!/bin/sh
-# Install/update the Fragua + Claude Code CLIs into the persistent
-# /fragua-data volume so updates need no image rebuild.
-#   fragua-refresh-cli                 # force-update both to latest
-#   fragua-refresh-cli --if-missing    # install only those absent (used by entrypoint)
+# Keep the Fragua + Claude Code CLIs current in the persistent /fragua-data
+# volume — which is FIRST on PATH, so the copy there is what actually runs.
+#   fragua-refresh-cli                 # force-update both to the LATEST release (network)
+#   fragua-refresh-cli --promote       # offline: copy the image baseline into the volume
+#                                      #   when it is newer or missing (run by the entrypoint)
+#   fragua-refresh-cli --if-missing    # install only those absent (network)
 #   fragua-refresh-cli claude|fragua   # restrict to one CLI
 set -e
 MODE=all; ONLY=""
 for a in "$@"; do
   case "$a" in
-    --if-missing) MODE=if-missing ;;
+    --promote)     MODE=promote ;;
+    --if-missing)  MODE=if-missing ;;
     claude|fragua) ONLY="$a" ;;
-    *) echo "usage: fragua-refresh-cli [--if-missing] [claude|fragua]" >&2; exit 1 ;;
+    *) echo "usage: fragua-refresh-cli [--promote|--if-missing] [claude|fragua]" >&2; exit 1 ;;
   esac
 done
 export NPM_CONFIG_PREFIX=/fragua-data/npm
-mkdir -p /fragua-data/npm /fragua-data/bin
+mkdir -p /fragua-data/npm/lib/node_modules/@anthropic-ai /fragua-data/npm/bin /fragua-data/bin
 
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 
+# ver <binary> -> dotted version (e.g. 1.3.1), or nothing if it can't be run.
+ver() { [ -x "$1" ] && "$1" --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1; }
+
+# is_newer A B -> success if version A is strictly greater than B (empty B = yes).
+is_newer() {
+  [ -n "$1" ] || return 1
+  [ -n "$2" ] || return 0
+  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
+}
+
+# ── Fragua — a single static binary; install.sh writes /usr/local/bin/fragua ───
+if want fragua; then
+  base=/usr/local/bin/fragua; vol=/fragua-data/bin/fragua
+  do_net=0
+  case "$MODE" in
+    all)        do_net=1 ;;
+    if-missing) [ -x "$vol" ] || do_net=1 ;;
+    promote)
+      bv=$(ver "$base"); vv=$(ver "$vol")
+      if [ ! -x "$vol" ] || is_newer "$bv" "$vv"; then
+        echo "==> promoting fragua ${vv:-(absent)} -> ${bv:-?} from the image baseline"
+        install -D -m 0755 "$base" "$vol"
+      fi
+      ;;
+  esac
+  if [ "$do_net" = 1 ]; then
+    echo "==> installing the latest Fragua CLI into the volume"
+    curl -fsSL https://github.com/maquina-app/fragua-tools/releases/latest/download/install.sh | sh
+    install -D -m 0755 "$base" "$vol"
+  fi
+fi
+
+# ── Claude Code — an npm package; promote copies the whole baseline tree ───────
 if want claude; then
-  if [ "$MODE" = all ] || ! [ -x /fragua-data/npm/bin/claude ]; then
-    echo "==> installing Claude Code into /fragua-data/npm"
+  base=/usr/local/bin/claude; vol=/fragua-data/npm/bin/claude
+  bpkg=/usr/local/lib/node_modules/@anthropic-ai/claude-code
+  do_net=0
+  case "$MODE" in
+    all)        do_net=1 ;;
+    if-missing) [ -x "$vol" ] || do_net=1 ;;
+    promote)
+      bv=$(ver "$base"); vv=$(ver "$vol")
+      if [ -x "$base" ] && { [ ! -e "$vol" ] || is_newer "$bv" "$vv"; }; then
+        echo "==> promoting claude ${vv:-(absent)} -> ${bv:-?} from the image baseline"
+        rm -rf /fragua-data/npm/lib/node_modules/@anthropic-ai/claude-code
+        cp -a "$bpkg" /fragua-data/npm/lib/node_modules/@anthropic-ai/
+        # Rewrite the bin symlink explicitly rather than trusting cp -a to keep a
+        # relative link: resolve the baseline's entry file inside the package and
+        # point a fresh relative symlink at the same file in the volume prefix.
+        entry=$(readlink -f "$base" 2>/dev/null || true)
+        case "$entry" in
+          "$bpkg"/*) ln -sf "../lib/node_modules/@anthropic-ai/claude-code/${entry#"$bpkg"/}" "$vol" ;;
+          *) cp -a "$base" "$vol" ;;  # unexpected layout — copy the link as-is
+        esac
+      fi
+      ;;
+  esac
+  if [ "$do_net" = 1 ]; then
+    echo "==> installing the latest Claude Code into the volume"
     npm install -g @anthropic-ai/claude-code
   fi
 fi
 
-if want fragua; then
-  if [ "$MODE" = all ] || ! [ -x /fragua-data/bin/fragua ]; then
-    echo "==> installing Fragua CLI into /fragua-data/bin"
-    # install.sh has no install-dir override; it writes /usr/local/bin/fragua as
-    # root, so run it then relocate the binary into the volume.
-    curl -fsSL https://github.com/maquina-app/fragua-tools/releases/latest/download/install.sh | sh
-    install -D -m 0755 "$(command -v fragua)" /fragua-data/bin/fragua
-  fi
-fi
-echo "==> CLIs:"
+echo "==> active CLIs:"
 command -v fragua && fragua --version 2>/dev/null || true
 command -v claude && claude --version 2>/dev/null || true
 EOF
@@ -231,7 +283,7 @@ export GEM_HOME=/fragua-data/gems
 export GEM_PATH="${GEM_HOME}:$(ruby -e 'print Gem.default_dir' 2>/dev/null)"
 export NPM_CONFIG_PREFIX=/fragua-data/npm
 export PATH="/fragua-data/gems/bin:/fragua-data/npm/bin:/fragua-data/bin:${PATH}"
-fragua-refresh-cli --if-missing || echo "warn: CLI bootstrap skipped (using image baseline)" >&2
+fragua-refresh-cli --promote || echo "warn: CLI promote skipped (using whatever is on PATH)" >&2
 exec "$@"
 EOF
 RUN chmod +x /usr/local/bin/fragua-entrypoint.sh

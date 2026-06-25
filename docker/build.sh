@@ -3,6 +3,9 @@
 # Build the Fragua agent image and (optionally) push it to GHCR.
 # For Docker / OrbStack.
 #
+# A single-arch build is also tagged `local/fragua:latest` (LOCAL_TAG) — the name
+# compose.yaml / fragua-host run — so a rebuild is immediately what they use.
+#
 # Usage:
 #   ./build.sh                          # build + push  ghcr.io/maquina-app/fragua-docker:latest
 #   ./build.sh --no-push                # build only, no registry push
@@ -26,6 +29,10 @@ TAG="${TAG:-latest}"
 ENGINE="${ENGINE:-docker}"
 
 REF="${REGISTRY}/${IMAGE}:${TAG}"
+
+# Local builds are also tagged with the name compose.yaml / fragua-host run, so a
+# rebuild is immediately what they use (no manual `docker tag`). Set empty to skip.
+LOCAL_TAG="${LOCAL_TAG:-local/fragua:latest}"
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 PUSH=1
@@ -75,12 +82,20 @@ if [[ -n "$PLATFORM" ]]; then
     --push \
     .
   echo "==> Done: ${REF} (${PLATFORM})"
+  echo "    (multi-arch buildx pushes directly and can't load locally, so"
+  echo "     '${LOCAL_TAG}' was not tagged — pull it if you need to run it here)"
   exit 0
 fi
 
 # ── Single-arch path ──────────────────────────────────────────────────────────
 echo "==> Building ${REF} with '${ENGINE}'"
 "$ENGINE" build $NO_CACHE $REFRESH_ARG -t "$REF" .
+
+# Point the local run name at this fresh build (compose.yaml / fragua-host use it).
+if [[ -n "$LOCAL_TAG" && "$LOCAL_TAG" != "$REF" ]]; then
+  echo "==> Tagging ${REF} as ${LOCAL_TAG}"
+  "$ENGINE" tag "$REF" "$LOCAL_TAG"
+fi
 
 if [[ "$PUSH" -eq 0 ]]; then
   echo "==> Built ${REF} (push skipped)"

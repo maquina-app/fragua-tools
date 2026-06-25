@@ -106,13 +106,20 @@ container image list | grep fragua
 From this directory (contains the `Dockerfile` and `build.sh`):
 
 ```bash
-./build.sh --no-push                       # builds local/... via build.sh, no registry push
+./build.sh --no-push                       # builds ghcr.io/...:latest, no registry push
 # or directly:
 container build -t local/fragua:latest .
 ```
 
+`build.sh` also tags the result `local/fragua:latest` (the name this guide and
+`fragua-host` use), so no manual retag is needed.
+
 The first build takes **~10–15 min** — the native-library layer is large.
 Cached rebuilds are fast.
+
+> If you rebuild while the agent is running, recreate the container so it adopts
+> the new image — `container rm -f fragua-agent` then re-run it (Phase 4b).
+> Just stopping/starting the existing container reuses the old image.
 
 ---
 
@@ -205,6 +212,12 @@ mkdir -p /fragua-secrets/gh /fragua-secrets/ssh && chmod 700 /fragua-secrets/ssh
 #    the volume; without it gh may save to an in-VM keyring that doesn't persist
 #    (this image ships dbus, so gh otherwise prefers the keyring).
 gh auth login --insecure-storage
+
+# 1b. Let git authenticate over HTTPS using the gh token (writes a credential
+#     helper into the persisted /fragua-config/gitconfig). Without this, HTTPS
+#     clones/pushes fail with "could not read Username for https://github.com";
+#     SSH-protocol git works regardless.
+gh auth setup-git
 
 # 2. Git identity + SSH key — do EITHER Option A or Option B.
 #    /root/.ssh is a symlink → /fragua-secrets/ssh, so keys land in the volume.
@@ -373,9 +386,23 @@ container volume delete fragua-workdir fragua-config fragua-secrets fragua-data
 - **Runtime `gem install` / `npm i -g` vanished after a rebuild** — confirm the
   `fragua-data` volume is mounted (Phase 4b). Without it, those installs live in
   the container's writable layer and are discarded on `rm`.
+- **Rebuilt with a newer `fragua`/`claude` but the agent still runs the old version**
+  — the CLIs run from the `fragua-data` volume, which is first on PATH and persists
+  across rebuilds, so the image's newer copy was being shadowed. On boot the
+  entrypoint now runs `fragua-refresh-cli --promote`, which copies the image baseline
+  into the volume whenever the image ships a **newer** version — so the version bump
+  is adopted automatically once a *new container* runs that entrypoint. A plain
+  `up`/`start` reuses the old container (old entrypoint run), so recreate it after a
+  rebuild: `fragua-host -c recreate`. To update without a rebuild, force a network
+  pull: `container exec fragua-agent fragua-refresh-cli`.
 - **`git@github.com` push fails "Host key verification failed"** — the image
   seeds `known_hosts` at build time; if you stripped that line, re-add the
   `ssh-keyscan github.com` step or pass `-o StrictHostKeyChecking=accept-new`.
+- **HTTPS git fails "could not read Username for `https://github.com`"** — no git
+  credential helper is wired to the gh token (the agent was set up SSH-only).
+  Run `gh auth setup-git` once inside the container; it writes the helper into
+  `/fragua-config/gitconfig` (rw) and persists. Verify with
+  `printf 'protocol=https\nhost=github.com\n\n' | git credential fill`.
 - **`git` push fails "Permission denied (publickey)"** — the SSH key in
   `fragua-secrets` isn't registered on GitHub. With **Option B** run `gh ssh-key add`
   (Phase 3c); with **Option A** make sure you copied a key that's already on your
