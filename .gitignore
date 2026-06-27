@@ -14,6 +14,9 @@ fragua-host
 # Local-only maintainer docs (e.g. RELEASING.local.md)
 *.local.md
 
+# Local docs (non-published)
+docs/
+
 # Secrets — never commit credentials
 .env
 .env.*
