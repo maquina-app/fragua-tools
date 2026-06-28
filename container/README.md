@@ -34,7 +34,7 @@ fast boot), it bundles:
   - Geospatial — GEOS, PROJ (for rgeo)
   - Rendering — Pango, Cairo
 - **CLIs** — GitHub CLI (`gh`), `git`, Claude Code (`@anthropic-ai/claude-code`),
-  and the **Fragua CLI** (installed from the latest release).
+  the **Fragua CLI**, and the **recuerd0 CLI** (all installed from the latest release).
 
 Default command:
 
@@ -92,9 +92,10 @@ installs them on **first boot** if missing, so a fresh volume bootstraps itself
 is logged). To pull the latest versions into a running container — no rebuild:
 
 ```bash
-container exec <name> fragua-refresh-cli            # update both
+container exec <name> fragua-refresh-cli            # update all
 container exec <name> fragua-refresh-cli claude     # just Claude Code
 container exec <name> fragua-refresh-cli fragua     # just fragua
+container exec <name> fragua-refresh-cli recuerd0   # just recuerd0
 ```
 
 Wiping the `fragua-data` volume re-bootstraps the CLIs on the next start. The

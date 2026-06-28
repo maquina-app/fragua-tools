@@ -143,6 +143,9 @@ RUN echo "cli refresh=${CLI_REFRESH}" \
 RUN curl -fsSL \
     https://github.com/maquina-app/fragua-tools/releases/latest/download/install.sh | sh
 
+RUN curl -fsSL \
+    https://github.com/maquina-app/recuerd0-cli/releases/latest/download/install.sh | sh
+
 # Config/secret dirs, plus the runtime-toolchain volume mountpoint. The agent's
 # own SSH dir is a symlink into the (read-only at runtime) secrets volume, so the
 # key lives beside the gh token and the agent can use but not overwrite it.
@@ -155,31 +158,18 @@ RUN mkdir -p \
     && ln -s /fragua-secrets/ssh /root/.ssh \
     && chmod 700 /fragua-secrets/ssh
 
-# ── Runtime CLI refresh — keep Claude Code + fragua current in the volume ──────
-# The build-time installs above are an offline baseline under /usr/local. This
-# script maintains the copies in the rw /fragua-data volume (first on PATH, so
-# they are what actually run). The entrypoint runs it with --promote on every
-# boot: it copies the image baseline into the volume whenever the image ships a
-# NEWER version (so a rebuild is adopted automatically) without clobbering a
-# still-newer copy fetched at runtime. Force a network update to latest with:
-#   docker compose exec fragua-agent fragua-refresh-cli
+# Runtime CLI refresh: maintains the /fragua-data (PATH-first) copies. Entrypoint
+# runs it --promote each boot. Keep this file lean (Apple Container Dockerfile limit).
 RUN cat > /usr/local/bin/fragua-refresh-cli <<'EOF'
 #!/bin/sh
-# Keep the Fragua + Claude Code CLIs current in the persistent /fragua-data
-# volume — which is FIRST on PATH, so the copy there is what actually runs.
-#   fragua-refresh-cli                 # force-update both to the LATEST release (network)
-#   fragua-refresh-cli --promote       # offline: copy the image baseline into the volume
-#                                      #   when it is newer or missing (run by the entrypoint)
-#   fragua-refresh-cli --if-missing    # install only those absent (network)
-#   fragua-refresh-cli claude|fragua   # restrict to one CLI
 set -e
 MODE=all; ONLY=""
 for a in "$@"; do
   case "$a" in
     --promote)     MODE=promote ;;
     --if-missing)  MODE=if-missing ;;
-    claude|fragua) ONLY="$a" ;;
-    *) echo "usage: fragua-refresh-cli [--promote|--if-missing] [claude|fragua]" >&2; exit 1 ;;
+    claude|fragua|recuerd0) ONLY="$a" ;;
+    *) echo "usage: fragua-refresh-cli [--promote|--if-missing] [claude|fragua|recuerd0]" >&2; exit 1 ;;
   esac
 done
 export NPM_CONFIG_PREFIX=/fragua-data/npm
@@ -187,39 +177,38 @@ mkdir -p /fragua-data/npm/lib/node_modules/@anthropic-ai /fragua-data/npm/bin /f
 
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 
-# ver <binary> -> dotted version (e.g. 1.3.1), or nothing if it can't be run.
-ver() { [ -x "$1" ] && "$1" --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1; }
+# version via `--version` (fragua/claude) or the `version` subcommand (recuerd0)
+ver() { [ -x "$1" ] || return 0; { "$1" --version 2>/dev/null || "$1" version 2>/dev/null; } | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1; }
 
-# is_newer A B -> success if version A is strictly greater than B (empty B = yes).
 is_newer() {
   [ -n "$1" ] || return 1
   [ -n "$2" ] || return 0
   [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
 }
 
-# ── Fragua — a single static binary; install.sh writes /usr/local/bin/fragua ───
-if want fragua; then
-  base=/usr/local/bin/fragua; vol=/fragua-data/bin/fragua
-  do_net=0
+static_cli() {  # <name> <install-url> — single static binary CLIs (fragua, recuerd0)
+  want "$1" || return 0
+  base=/usr/local/bin/$1; vol=/fragua-data/bin/$1; do_net=0
   case "$MODE" in
     all)        do_net=1 ;;
     if-missing) [ -x "$vol" ] || do_net=1 ;;
     promote)
       bv=$(ver "$base"); vv=$(ver "$vol")
       if [ ! -x "$vol" ] || is_newer "$bv" "$vv"; then
-        echo "==> promoting fragua ${vv:-(absent)} -> ${bv:-?} from the image baseline"
+        echo "==> promoting $1 ${vv:-(absent)} -> ${bv:-?} from the image baseline"
         install -D -m 0755 "$base" "$vol"
-      fi
-      ;;
+      fi ;;
   esac
   if [ "$do_net" = 1 ]; then
-    echo "==> installing the latest Fragua CLI into the volume"
-    curl -fsSL https://github.com/maquina-app/fragua-tools/releases/latest/download/install.sh | sh
+    echo "==> installing the latest $1 CLI into the volume"
+    curl -fsSL "$2" | sh
     install -D -m 0755 "$base" "$vol"
   fi
-fi
+}
+static_cli fragua   https://github.com/maquina-app/fragua-tools/releases/latest/download/install.sh
+static_cli recuerd0 https://github.com/maquina-app/recuerd0-cli/releases/latest/download/install.sh
 
-# ── Claude Code — an npm package; promote copies the whole baseline tree ───────
+# Claude Code — npm package; promote copies the whole baseline tree
 if want claude; then
   base=/usr/local/bin/claude; vol=/fragua-data/npm/bin/claude
   bpkg=/usr/local/lib/node_modules/@anthropic-ai/claude-code
@@ -233,13 +222,11 @@ if want claude; then
         echo "==> promoting claude ${vv:-(absent)} -> ${bv:-?} from the image baseline"
         rm -rf /fragua-data/npm/lib/node_modules/@anthropic-ai/claude-code
         cp -a "$bpkg" /fragua-data/npm/lib/node_modules/@anthropic-ai/
-        # Rewrite the bin symlink explicitly rather than trusting cp -a to keep a
-        # relative link: resolve the baseline's entry file inside the package and
-        # point a fresh relative symlink at the same file in the volume prefix.
+        # rewrite the bin symlink relative to the volume prefix
         entry=$(readlink -f "$base" 2>/dev/null || true)
         case "$entry" in
           "$bpkg"/*) ln -sf "../lib/node_modules/@anthropic-ai/claude-code/${entry#"$bpkg"/}" "$vol" ;;
-          *) cp -a "$base" "$vol" ;;  # unexpected layout — copy the link as-is
+          *) cp -a "$base" "$vol" ;;
         esac
       fi
       ;;
@@ -253,6 +240,7 @@ fi
 echo "==> active CLIs:"
 command -v fragua && fragua --version 2>/dev/null || true
 command -v claude && claude --version 2>/dev/null || true
+command -v recuerd0 && recuerd0 version 2>/dev/null || true
 EOF
 RUN chmod +x /usr/local/bin/fragua-refresh-cli
 

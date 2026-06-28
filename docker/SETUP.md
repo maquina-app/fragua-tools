@@ -114,7 +114,7 @@ docker volume ls | grep fragua
 | `fragua-config`  | `/fragua-config`  | `rw`         | fragua token + status/DB, `gitconfig` (`GIT_CONFIG_GLOBAL`), claude token + state (`CLAUDE_CONFIG_DIR=/fragua-config/claude`) |
 | `fragua-secrets` | `/fragua-secrets` | `ro`*        | gh token (`GH_CONFIG_DIR=/fragua-secrets/gh`) + SSH keypair (`/root/.ssh` → `/fragua-secrets/ssh`) |
 | `fragua-workdir` | `/fragua-workdir` | `rw`         | clones, `bundle install`, DBs, assets (`FRAGUA_WORKDIR`) |
-| `fragua-data`    | `/fragua-data`    | `rw`         | `claude` + `fragua` CLIs (installed on first boot), plus runtime `gem install` / `bundle install` / `npm install -g` output (`GEM_HOME`, `NPM_CONFIG_PREFIX`) |
+| `fragua-data`    | `/fragua-data`    | `rw`         | `claude` + `fragua` + `recuerd0` CLIs (installed on first boot), plus runtime `gem install` / `bundle install` / `npm install -g` output (`GEM_HOME`, `NPM_CONFIG_PREFIX`) |
 
 \* `fragua-secrets` is mounted **`rw` during the one-time setup below** (so you can
 write the gh token + SSH key) and **`ro` for every normal run** — the agent uses
@@ -211,6 +211,11 @@ claude -p "reply with the single word: ok"             # confirms the token work
 # 4. Fragua
 fragua login                               # paste your AgentToken from fragua.app → Settings
 fragua doctor
+
+# 5. recuerd0 (optional) — add your account; XDG_CONFIG_HOME=/fragua-config means
+#    the config lands at /fragua-config/recuerd0/config.yaml (persists in the volume)
+recuerd0 account add personal --api-url https://YOUR_SERVER --token YOUR_API_TOKEN
+recuerd0 workspace list                    # confirms it works
 exit
 ```
 
@@ -257,8 +262,8 @@ SSH-agent forwarding. The running agent is fully decoupled from your Mac.
   (It was `rw` during setup *only* so you could write them.)
 - **`fragua-workdir` → `rw` (internal)** — all agent output (`git clone`,
   `bundle install`, DB files, compiled assets) lands here.
-- **`fragua-data` → `rw` (internal)** — the `claude` + `fragua` CLIs (installed
-  on first boot, updatable via `fragua-refresh-cli` — see Lifecycle), plus
+- **`fragua-data` → `rw` (internal)** — the `claude` + `fragua` + `recuerd0` CLIs
+  (installed on first boot, updatable via `fragua-refresh-cli` — see Lifecycle), plus
   runtime-installed gems + global node modules + their bins, so a `gem install` /
   `bundle install` / `npm install -g` the agent runs survives a rebuild instead
   of being re-fetched each time.
@@ -307,8 +312,8 @@ docker compose down
 docker build --no-cache -t local/fragua:latest .
 docker compose up -d
 
-# update the CLIs (Claude Code + fragua) a running agent uses — no rebuild:
-docker compose exec fragua-agent fragua-refresh-cli           # both (or: claude / fragua)
+# update the CLIs (Claude Code + fragua + recuerd0) a running agent uses — no rebuild:
+docker compose exec fragua-agent fragua-refresh-cli           # all (or: claude / fragua / recuerd0)
 # (refresh only the image's offline baseline instead: ./build.sh --refresh-cli)
 
 # inspect the workdir without touching the running agent
@@ -456,8 +461,8 @@ docker run --rm -it \
 ```
 
 Then start the agent normally (Phase 4b). `fragua-data` starts empty — the
-`claude` + `fragua` CLIs are installed on first boot, and gems / node modules
-re-install on first use; all of it persists from then on.
+`claude` + `fragua` + `recuerd0` CLIs are installed on first boot, and gems / node
+modules re-install on first use; all of it persists from then on.
 
 > If `gh` reports "not authenticated" after the restore, the backed-up `hosts.yml`
 > was written by an older `gh` schema. Just re-run the login in a `--bash` session:

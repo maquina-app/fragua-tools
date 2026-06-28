@@ -246,6 +246,11 @@ claude -p "reply with the single word: ok"             # confirms the token work
 # 4. Fragua
 fragua login                               # paste your AgentToken from fragua.app → Settings
 fragua doctor
+
+# 5. recuerd0 (optional) — add your account; XDG_CONFIG_HOME=/fragua-config means
+#    the config lands at /fragua-config/recuerd0/config.yaml (persists in the volume)
+recuerd0 account add personal --api-url https://YOUR_SERVER --token YOUR_API_TOKEN
+recuerd0 workspace list                    # confirms it works
 exit
 ```
 
@@ -292,8 +297,8 @@ Every mount is an **internal named volume** — there are **no host paths** and 
   (It was `rw` during setup *only* so you could write them.)
 - **`fragua-workdir` → `rw` (internal)** — all agent output (`git clone`,
   `bundle install`, DB files, compiled assets) lands here.
-- **`fragua-data` → `rw` (internal)** — the `claude` + `fragua` CLIs (installed
-  on first boot, updatable via `fragua-refresh-cli` — see Lifecycle), plus
+- **`fragua-data` → `rw` (internal)** — the `claude` + `fragua` + `recuerd0` CLIs
+  (installed on first boot, updatable via `fragua-refresh-cli` — see Lifecycle), plus
   runtime-installed gems + global node modules + their bins, so a `gem install` /
   `bundle install` / `npm install -g` the agent runs survives a rebuild instead
   of being re-fetched each time.
@@ -339,8 +344,8 @@ container stop fragua-agent && container rm fragua-agent
 container build --no-cache -t local/fragua:latest .
 # re-run 4b — no re-login, workdir + gem/node cache preserved
 
-# update the CLIs (Claude Code + fragua) a running agent uses — no rebuild:
-container exec fragua-agent fragua-refresh-cli           # both (or: claude / fragua)
+# update the CLIs (Claude Code + fragua + recuerd0) a running agent uses — no rebuild:
+container exec fragua-agent fragua-refresh-cli           # all (or: claude / fragua / recuerd0)
 # (refresh only the image's offline baseline instead: ./build.sh --refresh-cli)
 
 # drop the runtime gem/node cache + CLIs (re-bootstrapped on next start, keeps creds)
