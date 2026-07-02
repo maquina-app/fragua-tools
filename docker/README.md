@@ -34,8 +34,9 @@ Built on `ubuntu:24.04`, it bundles:
   - Parsing & RPC — libxml2/libxslt, Protobuf, gRPC tooling
   - Geospatial — GEOS, PROJ (for rgeo)
   - Rendering — Pango, Cairo
-- **CLIs** — GitHub CLI (`gh`), `git`, Claude Code (`@anthropic-ai/claude-code`),
-  the **Fragua CLI**, and the **recuerd0 CLI** (all installed from the latest release).
+- **CLIs** — GitHub CLI (`gh`) with the [`gh-signoff`](https://github.com/basecamp/gh-signoff)
+  extension, `git`, Claude Code (`@anthropic-ai/claude-code`), the **Fragua CLI**, and the
+  **recuerd0 CLI** (all installed from the latest release).
 
 Default command:
 

@@ -158,6 +158,8 @@ RUN curl -fsSL \
 RUN curl -fsSL \
     https://github.com/maquina-app/recuerd0-cli/releases/latest/download/install.sh | sh
 
+RUN gh extension install basecamp/gh-signoff
+
 # Config/secret dirs, plus the runtime-toolchain volume mountpoint. The agent's
 # own SSH dir is a symlink into the (read-only at runtime) secrets volume, so the
 # key lives beside the gh token and the agent can use but not overwrite it.
