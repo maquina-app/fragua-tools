@@ -14,6 +14,7 @@ ENV FRAGUA_WORKDIR=/fragua-workdir
 ENV GH_CONFIG_DIR=/fragua-secrets/gh
 ENV GH_NO_UPDATE_NOTIFIER=1
 ENV CLAUDE_CONFIG_DIR=/fragua-config/claude
+ENV CODEX_HOME=/fragua-config/codex
 # This image runs as root by design (isolated container, no host mounts at
 # runtime, isolated named volumes). Claude Code refuses
 # --dangerously-skip-permissions as root unless it detects a recognized sandbox;
@@ -146,19 +147,54 @@ RUN curl -fsSL \
 RUN curl -fsSL \
     https://github.com/maquina-app/recuerd0-cli/releases/latest/download/install.sh | sh
 
+RUN npm install -g @openai/codex
+
 RUN gh extension install basecamp/gh-signoff
 
 # Config/secret dirs, plus the runtime-toolchain volume mountpoint. The agent's
 # own SSH dir is a symlink into the (read-only at runtime) secrets volume, so the
 # key lives beside the gh token and the agent can use but not overwrite it.
 RUN mkdir -p \
-        /fragua-config /fragua-config/claude \
+        /fragua-config /fragua-config/claude /fragua-config/codex \
+        /fragua-config/agents/skills \
         /fragua-secrets/gh /fragua-secrets/ssh \
         /fragua-workdir \
         /fragua-data/gems /fragua-data/npm /fragua-data/bin \
     && rm -rf /root/.ssh \
     && ln -s /fragua-secrets/ssh /root/.ssh \
-    && chmod 700 /fragua-secrets/ssh
+    && chmod 700 /fragua-secrets/ssh \
+    && rm -rf /root/.agents \
+    && ln -s /fragua-config/agents /root/.agents
+
+# npm CLI promote/install helper — called by fragua-refresh-cli with <bin> <pkg> <mode>
+RUN cat > /usr/local/bin/fragua-npm-cli <<'EOF'
+#!/bin/sh
+set -e
+bin=$1; pkg=$2; mode=${3:-all}
+base=/usr/local/bin/$bin; vol=/fragua-data/npm/bin/$bin
+bpkg=/usr/local/lib/node_modules/$pkg
+vpkg=/fragua-data/npm/lib/node_modules/$pkg; do_net=0
+ver() { [ -x "$1" ] || return 0; { "$1" --version 2>/dev/null || "$1" version 2>/dev/null; } | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1; }
+is_newer() { [ -n "$1" ] || return 1; [ -n "$2" ] || return 0; [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
+case "$mode" in
+  all)        do_net=1 ;;
+  if-missing) [ -x "$vol" ] || do_net=1 ;;
+  promote)
+    bv=$(ver "$base"); vv=$(ver "$vol")
+    if [ -x "$base" ] && { [ ! -e "$vol" ] || is_newer "$bv" "$vv"; }; then
+      echo "==> promoting $bin ${vv:-(absent)} -> ${bv:-?} from the image baseline"
+      rm -rf "$vpkg"; mkdir -p "$(dirname "$vpkg")"
+      cp -a "$bpkg" "$(dirname "$vpkg")/"
+      entry=$(readlink -f "$base" 2>/dev/null || true)
+      case "$entry" in
+        "$bpkg"/*) ln -sf "../lib/node_modules/$pkg/${entry#"$bpkg"/}" "$vol" ;;
+        *) cp -a "$base" "$vol" ;;
+      esac
+    fi ;;
+esac
+[ "$do_net" = 1 ] && npm install -g "$pkg"
+EOF
+RUN chmod +x /usr/local/bin/fragua-npm-cli
 
 # Runtime CLI refresh: maintains the /fragua-data (PATH-first) copies. Entrypoint
 # runs it --promote each boot. Keep this file lean (Apple Container Dockerfile limit).
@@ -170,12 +206,12 @@ for a in "$@"; do
   case "$a" in
     --promote)     MODE=promote ;;
     --if-missing)  MODE=if-missing ;;
-    claude|fragua|recuerd0) ONLY="$a" ;;
-    *) echo "usage: fragua-refresh-cli [--promote|--if-missing] [claude|fragua|recuerd0]" >&2; exit 1 ;;
+    claude|codex|fragua|recuerd0) ONLY="$a" ;;
+    *) echo "usage: fragua-refresh-cli [--promote|--if-missing] [claude|codex|fragua|recuerd0]" >&2; exit 1 ;;
   esac
 done
 export NPM_CONFIG_PREFIX=/fragua-data/npm
-mkdir -p /fragua-data/npm/lib/node_modules/@anthropic-ai /fragua-data/npm/bin /fragua-data/bin
+mkdir -p /fragua-data/npm/lib/node_modules/@anthropic-ai /fragua-data/npm/lib/node_modules/@openai /fragua-data/npm/bin /fragua-data/bin
 
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 
@@ -210,38 +246,13 @@ static_cli() {  # <name> <install-url> — single static binary CLIs (fragua, re
 static_cli fragua   https://github.com/maquina-app/fragua-tools/releases/latest/download/install.sh
 static_cli recuerd0 https://github.com/maquina-app/recuerd0-cli/releases/latest/download/install.sh
 
-# Claude Code — npm package; promote copies the whole baseline tree
-if want claude; then
-  base=/usr/local/bin/claude; vol=/fragua-data/npm/bin/claude
-  bpkg=/usr/local/lib/node_modules/@anthropic-ai/claude-code
-  do_net=0
-  case "$MODE" in
-    all)        do_net=1 ;;
-    if-missing) [ -x "$vol" ] || do_net=1 ;;
-    promote)
-      bv=$(ver "$base"); vv=$(ver "$vol")
-      if [ -x "$base" ] && { [ ! -e "$vol" ] || is_newer "$bv" "$vv"; }; then
-        echo "==> promoting claude ${vv:-(absent)} -> ${bv:-?} from the image baseline"
-        rm -rf /fragua-data/npm/lib/node_modules/@anthropic-ai/claude-code
-        cp -a "$bpkg" /fragua-data/npm/lib/node_modules/@anthropic-ai/
-        # rewrite the bin symlink relative to the volume prefix
-        entry=$(readlink -f "$base" 2>/dev/null || true)
-        case "$entry" in
-          "$bpkg"/*) ln -sf "../lib/node_modules/@anthropic-ai/claude-code/${entry#"$bpkg"/}" "$vol" ;;
-          *) cp -a "$base" "$vol" ;;
-        esac
-      fi
-      ;;
-  esac
-  if [ "$do_net" = 1 ]; then
-    echo "==> installing the latest Claude Code into the volume"
-    npm install -g @anthropic-ai/claude-code
-  fi
-fi
+if want claude; then fragua-npm-cli claude @anthropic-ai/claude-code "$MODE"; fi
+if want codex;  then fragua-npm-cli codex  @openai/codex             "$MODE"; fi
 
 echo "==> active CLIs:"
 command -v fragua && fragua --version 2>/dev/null || true
 command -v claude && claude --version 2>/dev/null || true
+command -v codex && codex --version 2>/dev/null || true
 command -v recuerd0 && recuerd0 version 2>/dev/null || true
 EOF
 RUN chmod +x /usr/local/bin/fragua-refresh-cli

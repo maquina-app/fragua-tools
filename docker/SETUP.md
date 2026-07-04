@@ -216,6 +216,13 @@ fragua doctor
 #    the config lands at /fragua-config/recuerd0/config.yaml (persists in the volume)
 recuerd0 account add personal --api-url https://YOUR_SERVER --token YOUR_API_TOKEN
 recuerd0 workspace list                    # confirms it works
+
+# 6. Codex CLI (optional) — CODEX_HOME=/fragua-config/codex is set automatically,
+#    so auth state persists in the fragua-config volume across rebuilds.
+#    Option A — API key (simplest; pass at run-time or prefix commands):
+#      CODEX_API_KEY=sk-... codex "your prompt"
+#    Option B — device-code login (one-time; writes auth.json to CODEX_HOME):
+codex login --device-auth                  # follow the printed URL + code in your browser
 exit
 ```
 
