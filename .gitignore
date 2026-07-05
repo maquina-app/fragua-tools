@@ -1,5 +1,6 @@
 # Scratch / working files
 tmp/
+plugins/
 
 # Local Claude Code config
 .claude/*
