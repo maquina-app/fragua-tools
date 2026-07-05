@@ -304,5 +304,16 @@ RUN { \
       echo 'export PATH="/fragua-data/gems/bin:/fragua-data/npm/bin:/fragua-data/bin:${PATH}"'; \
     } >> /etc/bash.bashrc
 
+# Liveness: unhealthy when the daemon's last SUCCESSFUL heartbeat is stale (a
+# wedge/partition) or unreadable. Surfaces in `docker ps` and lets an autoheal
+# sidecar / orchestrator restart it. Note plain `docker compose` does NOT restart
+# on unhealthy alone — the daemon's own liveness watchdog (fragua-cli) force-exits
+# on the same condition so `restart: unless-stopped` recovers a wedge regardless;
+# this HEALTHCHECK is the belt to that suspenders. 300s matches the daemon's
+# livenessMaxStale; start-period covers boot + the first heartbeat.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 CMD \
+  fragua status --json 2>/dev/null \
+  | ruby -rjson -rtime -e 'd=(JSON.parse($stdin.read)["daemon"] rescue nil); t=d&&d["last_heartbeat_ok_at"]; exit 1 unless t; exit((Time.now-Time.parse(t))<300 ? 0 : 1)'
+
 ENTRYPOINT ["/usr/local/bin/fragua-entrypoint.sh"]
 CMD ["fragua", "agent", "--workdir", "/fragua-workdir"]
