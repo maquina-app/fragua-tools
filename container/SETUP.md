@@ -136,7 +136,7 @@ is generating the Claude token once (it needs a browser).
 container volume create fragua-config     # fragua token, git identity, claude token + state → /fragua-config
 container volume create fragua-secrets    # gh token + SSH keypair → /fragua-secrets (ro at runtime)
 container volume create fragua-workdir    # agent work             → /fragua-workdir (FRAGUA_WORKDIR)
-container volume create fragua-data       # claude + fragua CLIs, runtime gems + node modules → /fragua-data
+container volume create fragua-data       # claude + fragua + recuerd0 CLIs, runtime gems + node modules → /fragua-data
 
 # confirm all four exist before running the agent
 container volume list
@@ -147,7 +147,7 @@ container volume list
 | `fragua-config`  | `/fragua-config`  | `rw`         | fragua token + status/DB, `gitconfig` (`GIT_CONFIG_GLOBAL`), claude token + state (`CLAUDE_CONFIG_DIR=/fragua-config/claude`) |
 | `fragua-secrets` | `/fragua-secrets` | `ro`*        | gh token (`GH_CONFIG_DIR=/fragua-secrets/gh`) + SSH keypair (`/root/.ssh` → `/fragua-secrets/ssh`) |
 | `fragua-workdir` | `/fragua-workdir` | `rw`         | clones, `bundle install`, DBs, assets (`FRAGUA_WORKDIR`) |
-| `fragua-data`    | `/fragua-data`    | `rw`         | `claude` + `fragua` CLIs (installed on first boot), plus runtime `gem install` / `bundle install` / `npm install -g` output (`GEM_HOME`, `NPM_CONFIG_PREFIX`) |
+| `fragua-data`    | `/fragua-data`    | `rw`         | `claude` + `fragua` + `recuerd0` CLIs (installed on first boot), plus runtime `gem install` / `bundle install` / `npm install -g` output (`GEM_HOME`, `NPM_CONFIG_PREFIX`) |
 
 \* `fragua-secrets` is mounted **`rw` during the one-time setup below** (so you can
 write the gh token + SSH key) and **`ro` for every normal run** — the agent uses
@@ -209,8 +209,8 @@ mkdir -p /fragua-secrets/gh /fragua-secrets/ssh && chmod 700 /fragua-secrets/ssh
 
 # 1. GitHub CLI — device-code flow works headless (opens a code + URL).
 #    --insecure-storage forces the token into GH_CONFIG_DIR=/fragua-secrets/gh on
-#    the volume; without it gh may save to an in-VM keyring that doesn't persist
-#    (this image ships dbus, so gh otherwise prefers the keyring).
+#    the volume; without it gh may save to an in-VM keyring that doesn't persist.
+#    (This image ships dbus, so gh otherwise prefers the keyring.)
 gh auth login --insecure-storage
 
 # 1b. Let git authenticate over HTTPS using the gh token (writes a credential
@@ -345,7 +345,7 @@ Project `.mise.toml` files override the global Ruby/Node version automatically.
 container logs --follow fragua-agent
 container exec -it fragua-agent bash      # inspect workdir, run rails cmds
 
-# rebuild — all volumes survive
+# rebuild — all volumes survive, no re-setup needed
 container exec fragua-agent fragua prune --yes
 container stop fragua-agent && container rm fragua-agent
 container build --no-cache -t local/fragua:latest .
@@ -355,6 +355,9 @@ container build --no-cache -t local/fragua:latest .
 container exec fragua-agent fragua-refresh-cli           # all (or: claude / fragua / recuerd0)
 # (refresh only the image's offline baseline instead: ./build.sh --refresh-cli)
 
+# inspect the workdir without touching the running agent
+container run --rm -v fragua-workdir:/data:ro alpine ls -la /data
+
 # drop the runtime gem/node cache + CLIs (re-bootstrapped on next start, keeps creds)
 container volume delete fragua-data && container volume create fragua-data
 
@@ -362,6 +365,9 @@ container volume delete fragua-data && container volume create fragua-data
 container rm -f fragua-agent
 container volume delete fragua-workdir fragua-config fragua-secrets fragua-data
 ```
+
+> No host coupling means **no re-create after a Mac reboot** — the agent doesn't
+> depend on the SSH agent socket anymore.
 
 ---
 
@@ -410,9 +416,10 @@ container volume delete fragua-workdir fragua-config fragua-secrets fragua-data
   entrypoint now runs `fragua-refresh-cli --promote`, which copies the image baseline
   into the volume whenever the image ships a **newer** version — so the version bump
   is adopted automatically once a *new container* runs that entrypoint. A plain
-  `up`/`start` reuses the old container (old entrypoint run), so recreate it after a
-  rebuild: `fragua-host -c recreate`. To update without a rebuild, force a network
-  pull: `container exec fragua-agent fragua-refresh-cli`.
+  `container start` reuses the old container (old entrypoint run), so recreate it
+  after a rebuild: `container rm -f fragua-agent`, then re-run Phase 4b. To update
+  without a rebuild, force a network pull:
+  `container exec fragua-agent fragua-refresh-cli`.
 - **`git@github.com` push fails "Host key verification failed"** — the image
   seeds `known_hosts` at build time; if you stripped that line, re-add the
   `ssh-keyscan github.com` step or pass `-o StrictHostKeyChecking=accept-new`.
@@ -498,8 +505,8 @@ container run --rm -it \
 ```
 
 Then start the agent normally (Phase 4b). `fragua-data` starts empty — the
-`claude` + `fragua` CLIs are installed on first boot, and gems / node modules
-re-install on first use; all of it persists from then on.
+`claude` + `fragua` + `recuerd0` CLIs are installed on first boot, and gems / node
+modules re-install on first use; all of it persists from then on.
 
 > If `gh` reports "not authenticated" after the restore, the backed-up `hosts.yml`
 > was written by an older `gh` schema (and this image prefers a keyring anyway).

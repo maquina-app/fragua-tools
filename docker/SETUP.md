@@ -175,6 +175,7 @@ mkdir -p /fragua-secrets/gh /fragua-secrets/ssh && chmod 700 /fragua-secrets/ssh
 # 1. GitHub CLI — device-code flow works headless (opens a code + URL).
 #    --insecure-storage forces the token into GH_CONFIG_DIR=/fragua-secrets/gh on
 #    the volume; without it gh may save to an in-VM keyring that doesn't persist.
+#    (This image ships dbus, so gh otherwise prefers the keyring.)
 gh auth login --insecure-storage
 
 # 1b. Let git authenticate over HTTPS using the gh token (writes a credential
@@ -357,12 +358,13 @@ docker volume rm fragua-workdir fragua-config fragua-secrets fragua-data
   `/fragua-config/gitconfig` (rw) and persists. Verify with
   `printf 'protocol=https\nhost=github.com\n\n' | git credential fill`.
 - **`claude` `/login` fails with "Invalid OAuth Request / Unknown scope"** — the
-  browser redirect flow can't complete in a headless container. Use
-  `claude setup-token` on your Mac and write the result to
+  browser redirect flow can't complete in a headless container. Don't use
+  `/login`; run `claude setup-token` on your **Mac** and write the result to
   `/fragua-config/claude-oauth-token` (Phase 3b–3c).
 - **`claude -p` says "not logged in" at runtime** — the token file is missing or
   empty. Check `/fragua-config/claude-oauth-token` exists in the `fragua-config`
-  volume; the image's entrypoint reads it on every run.
+  volume; the image's entrypoint reads it on every run. (An explicit
+  `--env CLAUDE_CODE_OAUTH_TOKEN` overrides the file if you prefer.)
 - **`--dangerously-skip-permissions cannot be used with root/sudo privileges`** —
   Claude Code blocks that flag as root unless it detects a recognized sandbox. The
   image runs as root by design and sets `IS_SANDBOX=1` (a `Dockerfile` `ENV`, so it
@@ -371,19 +373,19 @@ docker volume rm fragua-workdir fragua-config fragua-secrets fragua-data
   rebuild, or set `IS_SANDBOX=1` in the environment when invoking `claude`.
 - **`gh` says "not logged in" at runtime** — the `fragua-secrets` volume isn't
   mounted or is empty. Re-run the Phase 3c `gh auth login --insecure-storage`.
-- **`gh` asks you to authenticate on every run / the token never persists** — `gh`
-  saved it to an in-VM keyring instead of the volume, or the image is stale. Fix:
-  (1) confirm `echo $GH_CONFIG_DIR` prints `/fragua-secrets/gh` — an old image
-  prints `/fragua-gh`, which isn't mounted, so the token is discarded on exit;
-  rebuild + re-tag `local/fragua:latest` if so. (2) Re-run
-  `gh auth login --insecure-storage` and check the token landed with
+- **`gh` asks you to authenticate on every run / the token never persists** — this
+  image ships `dbus`, so plain `gh auth login` saves the token to an in-VM keyring
+  that isn't on the volume. Fix: (1) confirm `echo $GH_CONFIG_DIR` prints
+  `/fragua-secrets/gh` — an old image prints `/fragua-gh`, which isn't mounted, so
+  the token is discarded on exit; rebuild + re-tag `local/fragua:latest` if so.
+  (2) Re-run `gh auth login --insecure-storage` and verify with
   `grep -c oauth_token /fragua-secrets/gh/hosts.yml` (expect > 0).
 - **`gh`/`git` can't write at runtime ("read-only file system")** — expected:
   `fragua-secrets` is `ro` at runtime by design. To rotate the token or key,
   re-run the Phase 3c setup shell (which mounts it `:rw`).
 - **Runtime `gem install` / `npm i -g` vanished after a rebuild** — confirm the
   `fragua-data` volume is mounted (Phase 4). Without it, those installs live in the
-  container's writable layer and are discarded on `down`/`rm`.
+  container's writable layer and are discarded on `rm`.
 - **Rebuilt with a newer `fragua`/`claude` but the agent still runs the old version**
   — the CLIs run from the `fragua-data` volume, which is first on PATH and persists
   across rebuilds, so the image's newer copy was being shadowed. On boot the
@@ -470,9 +472,9 @@ Then start the agent normally (Phase 4b). `fragua-data` starts empty — the
 modules re-install on first use; all of it persists from then on.
 
 > If `gh` reports "not authenticated" after the restore, the backed-up `hosts.yml`
-> was written by an older `gh` schema. Just re-run the login in a `--bash` session:
-> `gh auth login --insecure-storage`. The SSH key restore is schema-agnostic and
-> needs no redo.
+> was written by an older `gh` schema (and this image prefers a keyring anyway).
+> Just re-run the login in a `--bash` session: `gh auth login --insecure-storage`.
+> The SSH key restore is schema-agnostic and needs no redo.
 
 Once the agent is online and `git push` works, you can delete the old volumes:
 
