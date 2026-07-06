@@ -206,6 +206,7 @@ container run --rm -it \
 # ── inside the container ──────────────────────────────────────────────
 # 0. Create the secret subdirs (the empty volume hides the image's baked dirs)
 mkdir -p /fragua-secrets/gh /fragua-secrets/ssh && chmod 700 /fragua-secrets/ssh
+mkdir -p /fragua-config/codex    # ensure CODEX_HOME exists (volume hides image-baked dirs)
 
 # 1. GitHub CLI — device-code flow works headless (opens a code + URL).
 #    --insecure-storage forces the token into GH_CONFIG_DIR=/fragua-secrets/gh on
@@ -256,8 +257,12 @@ recuerd0 workspace list                    # confirms it works
 #    so auth state persists in the fragua-config volume across rebuilds.
 #    Option A — API key (simplest; pass at run-time or prefix commands):
 #      CODEX_API_KEY=sk-... codex "your prompt"
-#    Option B — device-code login (one-time; writes auth.json to CODEX_HOME):
+#    Option B — device-code login (one-time; writes auth.json to $CODEX_HOME):
+#      Force file storage first — default "auto" mode may try the in-container keyring
+#      (dbus is present) and not write auth.json, losing the token on recreate.
+printf '[settings]\ncli_auth_credentials_store = "file"\n' >> "$CODEX_HOME/config.toml"
 codex login --device-auth                  # follow the printed URL + code in your browser
+ls "$CODEX_HOME/auth.json"                 # confirm auth.json was written
 exit
 ```
 
