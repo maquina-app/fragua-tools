@@ -6,8 +6,8 @@ stack and all native development libraries pre-installed.
 
 **Why this setup:** maximum isolation + full stack. Agent runs — `bundle
 install`, DB migrations, asset compilation, image processing, PDF generation —
-all stay inside the `fragua-workdir` volume. All four volumes survive `docker
-compose down` and image rebuilds, so there's no re-login and no lost work after
+all stay inside the `fragua-workdir` volume. All four volumes survive container
+restarts and image rebuilds, so there's no re-login and no lost work after
 an update. Nothing in your Mac's `~/` is exposed to agent writes.
 
 > OrbStack is recommended on Apple silicon (lighter, faster, better SSH-agent
@@ -59,7 +59,7 @@ docker login ghcr.io -u <github-username>
 # 2. pull the image
 docker pull ghcr.io/maquina-app/fragua-docker:latest
 
-# 3. tag it locally so the guide / compose.yaml `local/fragua:latest` works
+# 3. tag it locally so the guide's `local/fragua:latest` works
 docker tag ghcr.io/maquina-app/fragua-docker:latest local/fragua:latest
 
 # 4. confirm it's present
@@ -71,7 +71,7 @@ docker image ls | grep fragua
 
 ### Option B — build it yourself
 
-From this directory (contains the `Dockerfile`, `build.sh`, `compose.yaml`):
+From this directory (contains the `Dockerfile` and `build.sh`):
 
 ```bash
 ./build.sh --no-push                # builds ghcr.io/...:latest locally, no push
@@ -83,10 +83,9 @@ The first build takes **~10–15 min** — the native-library layer is large.
 Cached rebuilds are fast.
 
 > `build.sh` already tags the result `local/fragua:latest` (the name this guide
-> and `compose.yaml` use), so no manual `docker tag` is needed. If you ever
-> rebuild while the agent is running, recreate the container so it adopts the new
-> image — `docker compose up -d --force-recreate` (a plain `up -d`/`start` keeps
-> the old one).
+> uses), so no manual `docker tag` is needed. If you rebuild while the agent is
+> running, stop and remove the container (`docker stop fragua-agent && docker rm
+> fragua-agent`) then re-run it (Phase 4b).
 
 ---
 
@@ -279,48 +278,46 @@ SSH-agent forwarding. The running agent is fully decoupled from your Mac.
 > **internal named volume**, so writes never reach your Mac. The GitHub token and
 > SSH key stay read-only.
 
-### 4b. Start with Docker Compose (recommended)
-
-The repo ships a ready-to-use [`compose.yaml`](./compose.yaml) — it mounts only
-the four volumes (no host paths, no env), since the config-dir vars are baked
-into the image and the entrypoint loads the Claude token from the volume. From
-this directory:
+### 4b. Start the container
 
 ```bash
-docker compose up -d
-docker compose logs --follow
-docker compose exec fragua-agent fragua status
+docker run \
+  --detach \
+  --name fragua-agent \
+  --restart unless-stopped \
+  -v fragua-config:/fragua-config:rw \
+  -v fragua-secrets:/fragua-secrets:ro \
+  -v fragua-workdir:/fragua-workdir:rw \
+  -v fragua-data:/fragua-data:rw \
+  local/fragua:latest
 ```
+
+> The config-dir env vars (`XDG_CONFIG_HOME`, `GH_CONFIG_DIR`,
+> `CLAUDE_CONFIG_DIR`, `GIT_CONFIG_GLOBAL`) are baked into the image, and the
+> entrypoint loads the Claude token from the volume — so the run line needs only
+> the volume mounts. No host shell state required.
 
 Check **fragua.app → Agents** — the machine appears online within seconds.
 A workspace's own `.mise.toml` overrides the global Ruby/Node version when the
 agent enters that directory.
-
-> Prefer a one-off `docker run`? The equivalent of the Compose file (note
-> `fragua-secrets` is `:ro`):
->
-> ```bash
-> docker run -d --name fragua-agent --restart unless-stopped \
->   -v fragua-config:/fragua-config:rw \
->   -v fragua-secrets:/fragua-secrets:ro \
->   -v fragua-workdir:/fragua-workdir:rw \
->   -v fragua-data:/fragua-data:rw \
->   local/fragua:latest
-> ```
 
 ---
 
 ## Lifecycle
 
 ```bash
+# follow logs / inspect the workdir
+docker logs --follow fragua-agent
+docker exec -it fragua-agent bash      # inspect workdir, run rails cmds
+
 # rebuild — all volumes survive, no re-setup needed
-docker compose exec fragua-agent fragua prune --yes
-docker compose down
+docker exec fragua-agent fragua prune --yes
+docker stop fragua-agent && docker rm fragua-agent
 docker build --no-cache -t local/fragua:latest .
-docker compose up -d
+# re-run 4b — no re-login, workdir + gem/node cache preserved
 
 # update the CLIs (Claude Code + fragua + recuerd0) a running agent uses — no rebuild:
-docker compose exec fragua-agent fragua-refresh-cli           # all (or: claude / fragua / recuerd0)
+docker exec fragua-agent fragua-refresh-cli           # all (or: claude / fragua / recuerd0)
 # (refresh only the image's offline baseline instead: ./build.sh --refresh-cli)
 
 # inspect the workdir without touching the running agent
@@ -330,7 +327,7 @@ docker run --rm -v fragua-workdir:/data:ro alpine ls -la /data
 docker volume rm fragua-data && docker volume create fragua-data
 
 # nuclear — wipes all work + every credential (forces full re-setup, incl. SSH key)
-docker compose down
+docker rm -f fragua-agent
 docker volume rm fragua-workdir fragua-config fragua-secrets fragua-data
 ```
 
@@ -393,9 +390,10 @@ docker volume rm fragua-workdir fragua-config fragua-secrets fragua-data
   entrypoint now runs `fragua-refresh-cli --promote`, which copies the image baseline
   into the volume whenever the image ships a **newer** version — so the version bump
   is adopted automatically once a *new container* runs that entrypoint. A plain
-  `up -d`/`start` reuses the old container (old entrypoint run), so recreate it after
-  a rebuild: `docker compose up -d --force-recreate`. To update without a rebuild,
-  force a network pull: `docker compose exec fragua-agent fragua-refresh-cli`.
+  `docker start` reuses the old container (old entrypoint run), so recreate it after
+  a rebuild: `docker stop fragua-agent && docker rm fragua-agent`, then re-run Phase
+  4b. To update without a rebuild, force a network pull:
+  `docker exec fragua-agent fragua-refresh-cli`.
 - **Agent doesn't appear online** — confirm `fragua login` succeeded inside the
   container (Phase 3c) and that the `fragua-config` volume is mounted in Phase 4.
 - **`linux/amd64` host can't run an arm64 image** — publish a multi-arch image
