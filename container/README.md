@@ -11,6 +11,9 @@ Published as **`ghcr.io/maquina-app/fragua-container:latest`**.
 > (kernel install), host tools, named volumes, login, and running the agent —
 > is in **[SETUP.md](./SETUP.md)** and at **<https://fragua.app/guides>**. This
 > README covers what the image contains and how to build/publish it.
+>
+> Running on **Docker / OrbStack** instead? See the sibling
+> [`../docker`](../docker) image.
 
 ## What the image provides
 
@@ -56,7 +59,7 @@ a host bind-mount can't deliver them.
 | `fragua-config`  | `/fragua-config`  | `rw` | fragua token + status/DB, Git identity (`gitconfig`), Claude token + session state (`XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, `CLAUDE_CONFIG_DIR=/fragua-config/claude`) |
 | `fragua-secrets` | `/fragua-secrets` | `ro` | GitHub CLI token (`GH_CONFIG_DIR=/fragua-secrets/gh`) + the container's SSH keypair (`/root/.ssh` → `/fragua-secrets/ssh`). Mounted `rw` only during setup. |
 | `fragua-workdir` | `/fragua-workdir` | `rw` | Agent working tree — clones, `bundle install`, DBs, assets (`FRAGUA_WORKDIR`) |
-| `fragua-data`    | `/fragua-data`    | `rw` | The active `claude` (`/fragua-data/npm/bin`) and `fragua` (`/fragua-data/bin`) CLIs, plus runtime-installed gems + global node modules (`GEM_HOME=/fragua-data/gems`, `NPM_CONFIG_PREFIX=/fragua-data/npm`) — so CLI updates and agent installs survive a rebuild |
+| `fragua-data`    | `/fragua-data`    | `rw` | The active `claude` (`/fragua-data/npm/bin`), `fragua`, and `recuerd0` (`/fragua-data/bin`) CLIs, plus runtime-installed gems + global node modules (`GEM_HOME=/fragua-data/gems`, `NPM_CONFIG_PREFIX=/fragua-data/npm`) — so CLI updates and agent installs survive a rebuild |
 
 Create them once:
 
@@ -72,7 +75,7 @@ token + SSH **private** key), so it's mounted **read-only at runtime** — and `
 only during the one-time setup that writes them. `fragua-data` persists everything
 the agent installs at runtime (`gem install`, `bundle install`, `npm install -g`),
 which otherwise lives in the container's writable layer and is lost on rebuild.
-The `claude` and `fragua` CLIs also live here: the entrypoint installs them on
+The `claude`, `fragua`, and `recuerd0` CLIs also live here: the entrypoint installs them on
 first boot and they take precedence over the image's baseline copies, so you can
 update them from a running container without a rebuild (see
 [Updating the CLIs](#updating-the-clis-without-a-rebuild)). The heavy build-time
@@ -93,10 +96,10 @@ installs them on **first boot** if missing, so a fresh volume bootstraps itself
 is logged). To pull the latest versions into a running container — no rebuild:
 
 ```bash
-container exec <name> fragua-refresh-cli            # update all
-container exec <name> fragua-refresh-cli claude     # just Claude Code
-container exec <name> fragua-refresh-cli fragua     # just fragua
-container exec <name> fragua-refresh-cli recuerd0   # just recuerd0
+container exec fragua-agent fragua-refresh-cli            # update all
+container exec fragua-agent fragua-refresh-cli claude     # just Claude Code
+container exec fragua-agent fragua-refresh-cli fragua     # just fragua
+container exec fragua-agent fragua-refresh-cli recuerd0   # just recuerd0
 ```
 
 Wiping the `fragua-data` volume re-bootstraps the CLIs on the next start. The
