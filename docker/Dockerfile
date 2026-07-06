@@ -160,6 +160,7 @@ RUN mkdir -p \
         /fragua-secrets/gh /fragua-secrets/ssh \
         /fragua-workdir \
         /fragua-data/gems /fragua-data/npm /fragua-data/bin \
+    && printf '[settings]\ncli_auth_credentials_store = "file"\n' > /fragua-config/codex/config.toml \
     && rm -rf /root/.ssh \
     && ln -s /fragua-secrets/ssh /root/.ssh \
     && chmod 700 /fragua-secrets/ssh \
