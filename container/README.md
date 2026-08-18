@@ -37,8 +37,14 @@ fast boot), it bundles:
   - Geospatial — GEOS, PROJ (for rgeo)
   - Rendering — Pango, Cairo
 - **CLIs** — GitHub CLI (`gh`) with the [`gh-signoff`](https://github.com/basecamp/gh-signoff)
-  extension, `git`, Claude Code (`@anthropic-ai/claude-code`), the **Fragua CLI**, and the
-  **recuerd0 CLI** (all installed from the latest release).
+  extension, `git`, Claude Code (`@anthropic-ai/claude-code`), the **Fragua CLI**, the
+  **recuerd0 CLI**, and **equipr** (a skills/commands/MCP installer — all installed from
+  the latest release).
+- **Headless browser automation** — [`agent-browser`](https://www.npmjs.com/package/agent-browser),
+  installed globally and pointed at a baked-in **Playwright Chromium** (with its OS
+  dependencies) via `AGENT_BROWSER_EXECUTABLE_PATH`. Chrome for Testing ships no
+  Linux arm64 build, so Playwright's Chromium is used instead; the agent can drive
+  a browser out of the box — no runtime download needed.
 
 Default command:
 
@@ -56,10 +62,10 @@ a host bind-mount can't deliver them.
 
 | Volume           | Mount path        | Runtime mode | Purpose                                              |
 | ---------------- | ----------------- | ------------ | ---------------------------------------------------- |
-| `fragua-config`  | `/fragua-config`  | `rw` | fragua token + status/DB, Git identity (`gitconfig`), Claude token + session state (`XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, `CLAUDE_CONFIG_DIR=/fragua-config/claude`) |
+| `fragua-config`  | `/fragua-config`  | `rw` | fragua token + status/DB, Git identity (`gitconfig`), Claude token + session state (`XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, `CLAUDE_CONFIG_DIR=/fragua-config/claude`), and equipr's config + skills cache/state (`/fragua-config/equipr`) plus equipr-installed skills (via `~/.claude` → `/fragua-config/claude`) |
 | `fragua-secrets` | `/fragua-secrets` | `ro` | GitHub CLI token (`GH_CONFIG_DIR=/fragua-secrets/gh`) + the container's SSH keypair (`/root/.ssh` → `/fragua-secrets/ssh`). Mounted `rw` only during setup. |
 | `fragua-workdir` | `/fragua-workdir` | `rw` | Agent working tree — clones, `bundle install`, DBs, assets (`FRAGUA_WORKDIR`) |
-| `fragua-data`    | `/fragua-data`    | `rw` | The active `claude` (`/fragua-data/npm/bin`), `fragua`, and `recuerd0` (`/fragua-data/bin`) CLIs, plus runtime-installed gems + global node modules (`GEM_HOME=/fragua-data/gems`, `NPM_CONFIG_PREFIX=/fragua-data/npm`) — so CLI updates and agent installs survive a rebuild |
+| `fragua-data`    | `/fragua-data`    | `rw` | The active `claude` (`/fragua-data/npm/bin`), `fragua`, `recuerd0`, and `equipr` (`/fragua-data/bin`) CLIs, plus runtime-installed gems + global node modules (`GEM_HOME=/fragua-data/gems`, `NPM_CONFIG_PREFIX=/fragua-data/npm`) — so CLI updates and agent installs survive a rebuild |
 
 Create them once:
 
@@ -75,7 +81,7 @@ token + SSH **private** key), so it's mounted **read-only at runtime** — and `
 only during the one-time setup that writes them. `fragua-data` persists everything
 the agent installs at runtime (`gem install`, `bundle install`, `npm install -g`),
 which otherwise lives in the container's writable layer and is lost on rebuild.
-The `claude`, `fragua`, and `recuerd0` CLIs also live here: the entrypoint installs them on
+The `claude`, `fragua`, `recuerd0`, and `equipr` CLIs also live here: the entrypoint installs them on
 first boot and they take precedence over the image's baseline copies, so you can
 update them from a running container without a rebuild (see
 [Updating the CLIs](#updating-the-clis-without-a-rebuild)). The heavy build-time
@@ -100,6 +106,7 @@ container exec fragua-agent fragua-refresh-cli            # update all
 container exec fragua-agent fragua-refresh-cli claude     # just Claude Code
 container exec fragua-agent fragua-refresh-cli fragua     # just fragua
 container exec fragua-agent fragua-refresh-cli recuerd0   # just recuerd0
+container exec fragua-agent fragua-refresh-cli equipr     # just equipr
 ```
 
 Wiping the `fragua-data` volume re-bootstraps the CLIs on the next start. The

@@ -136,7 +136,7 @@ is generating the Claude token once (it needs a browser).
 container volume create fragua-config     # fragua token, git identity, claude token + state → /fragua-config
 container volume create fragua-secrets    # gh token + SSH keypair → /fragua-secrets (ro at runtime)
 container volume create fragua-workdir    # agent work             → /fragua-workdir (FRAGUA_WORKDIR)
-container volume create fragua-data       # claude + fragua + recuerd0 CLIs, runtime gems + node modules → /fragua-data
+container volume create fragua-data       # claude + fragua + recuerd0 + equipr CLIs, runtime gems + node modules → /fragua-data
 
 # confirm all four exist before running the agent
 container volume list
@@ -144,10 +144,10 @@ container volume list
 
 | Volume           | Mount path        | Runtime mode | Holds                                              |
 | ---------------- | ----------------- | ------------ | -------------------------------------------------- |
-| `fragua-config`  | `/fragua-config`  | `rw`         | fragua token + status/DB, `gitconfig` (`GIT_CONFIG_GLOBAL`), claude token + state (`CLAUDE_CONFIG_DIR=/fragua-config/claude`) |
+| `fragua-config`  | `/fragua-config`  | `rw`         | fragua token + status/DB, `gitconfig` (`GIT_CONFIG_GLOBAL`), claude token + state (`CLAUDE_CONFIG_DIR=/fragua-config/claude`), equipr config + skills cache/state (`/fragua-config/equipr`) + equipr-installed skills (`~/.claude` → `/fragua-config/claude`) |
 | `fragua-secrets` | `/fragua-secrets` | `ro`*        | gh token (`GH_CONFIG_DIR=/fragua-secrets/gh`) + SSH keypair (`/root/.ssh` → `/fragua-secrets/ssh`) |
 | `fragua-workdir` | `/fragua-workdir` | `rw`         | clones, `bundle install`, DBs, assets (`FRAGUA_WORKDIR`) |
-| `fragua-data`    | `/fragua-data`    | `rw`         | `claude` + `fragua` + `recuerd0` CLIs (installed on first boot), plus runtime `gem install` / `bundle install` / `npm install -g` output (`GEM_HOME`, `NPM_CONFIG_PREFIX`) |
+| `fragua-data`    | `/fragua-data`    | `rw`         | `claude` + `fragua` + `recuerd0` + `equipr` CLIs (installed on first boot), plus runtime `gem install` / `bundle install` / `npm install -g` output (`GEM_HOME`, `NPM_CONFIG_PREFIX`) |
 
 \* `fragua-secrets` is mounted **`rw` during the one-time setup below** (so you can
 write the gh token + SSH key) and **`ro` for every normal run** — the agent uses
@@ -263,6 +263,20 @@ recuerd0 workspace list                    # confirms it works
 printf '[settings]\ncli_auth_credentials_store = "file"\n' >> "$CODEX_HOME/config.toml"
 codex login --device-auth                  # follow the printed URL + code in your browser
 ls "$CODEX_HOME/auth.json"                 # confirm auth.json was written
+
+# 7. agent-browser — headless browser automation. Nothing to log in or set up:
+#    it's installed globally and pointed at a baked-in Playwright Chromium via
+#    AGENT_BROWSER_EXECUTABLE_PATH (Chrome for Testing has no Linux arm64 build),
+#    so it's ready the moment the container starts.
+agent-browser --help                       # confirms it's on PATH
+
+# 8. equipr (optional) — installs skills/commands/MCP servers into the agents.
+#    Config, the source-clone cache, and state persist in the fragua-config volume
+#    (XDG_CONFIG_HOME=/fragua-config; cache/state are symlinked there), and skills
+#    installed for claude land in /fragua-config/claude/skills (~/.claude symlink),
+#    so both the cache and the installed skills survive a rebuild.
+equipr --version                           # confirms it's on PATH
+# e.g.: equipr install <source> --agent claude-code
 exit
 ```
 
@@ -309,8 +323,8 @@ Every mount is an **internal named volume** — there are **no host paths** and 
   (It was `rw` during setup *only* so you could write them.)
 - **`fragua-workdir` → `rw` (internal)** — all agent output (`git clone`,
   `bundle install`, DB files, compiled assets) lands here.
-- **`fragua-data` → `rw` (internal)** — the `claude` + `fragua` + `recuerd0` CLIs
-  (installed on first boot, updatable via `fragua-refresh-cli` — see Lifecycle), plus
+- **`fragua-data` → `rw` (internal)** — the `claude` + `fragua` + `recuerd0` + `equipr`
+  CLIs (installed on first boot, updatable via `fragua-refresh-cli` — see Lifecycle), plus
   runtime-installed gems + global node modules + their bins, so a `gem install` /
   `bundle install` / `npm install -g` the agent runs survives a rebuild instead
   of being re-fetched each time.
@@ -356,8 +370,8 @@ container stop fragua-agent && container rm fragua-agent
 container build --no-cache -t local/fragua:latest .
 # re-run 4b — no re-login, workdir + gem/node cache preserved
 
-# update the CLIs (Claude Code + fragua + recuerd0) a running agent uses — no rebuild:
-container exec fragua-agent fragua-refresh-cli           # all (or: claude / fragua / recuerd0)
+# update the CLIs (Claude Code + fragua + recuerd0 + equipr) a running agent uses — no rebuild:
+container exec fragua-agent fragua-refresh-cli           # all (or: claude / fragua / recuerd0 / equipr)
 # (refresh only the image's offline baseline instead: ./build.sh --refresh-cli)
 
 # inspect the workdir without touching the running agent
@@ -510,7 +524,7 @@ container run --rm -it \
 ```
 
 Then start the agent normally (Phase 4b). `fragua-data` starts empty — the
-`claude` + `fragua` + `recuerd0` CLIs are installed on first boot, and gems / node
+`claude` + `fragua` + `recuerd0` + `equipr` CLIs are installed on first boot, and gems / node
 modules re-install on first use; all of it persists from then on.
 
 > If `gh` reports "not authenticated" after the restore, the backed-up `hosts.yml`

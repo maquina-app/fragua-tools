@@ -16,11 +16,9 @@ ENV GH_CONFIG_DIR=/fragua-secrets/gh
 ENV GH_NO_UPDATE_NOTIFIER=1
 ENV CLAUDE_CONFIG_DIR=/fragua-config/claude
 ENV CODEX_HOME=/fragua-config/codex
-# This image runs as root by design (isolated container, no host mounts at
-# runtime, isolated named volumes). Claude Code refuses
-# --dangerously-skip-permissions as root unless it detects a recognized sandbox;
-# IS_SANDBOX=1 is that signal, so the agent can run unattended. Set as ENV so it
-# reaches the entrypoint/CMD, interactive shells, and `container exec` alike.
+# Runs as root by design. Claude Code refuses --dangerously-skip-permissions as
+# root unless a sandbox is detected; IS_SANDBOX=1 is that signal. ENV so it
+# reaches entrypoint/CMD, shells, and `container exec` alike. See SETUP.md.
 ENV IS_SANDBOX=1
 # Git reads its global config from here → persisted in the fragua-config volume,
 # so identity is set once in-container instead of bind-mounting host ~/.gitconfig.
@@ -95,8 +93,7 @@ RUN apt-get update && apt-get install -y \
     # ruby-ldap, enterprise auth
     libsasl2-dev \
     \
-    # optional — uncomment if needed:
-    # libgdal-dev         # PostGIS / heavy geospatial (+150MB)
+    # libgdal-dev  # PostGIS / heavy geospatial (+150MB) — uncomment if needed
     \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -128,7 +125,8 @@ node = "26"
 EOF
 
 RUN mise install --yes \
-    && mise reshim
+    && mise reshim \
+    && rm -rf /root/.cache/mise
 
 # ── Bundler — system libs for native gems ────────────────────────────────────
 RUN bundle config set --global build.nokogiri \
@@ -151,7 +149,8 @@ RUN gem install bundler \
 ARG CLI_REFRESH=0
 
 RUN echo "cli refresh=${CLI_REFRESH}" \
-    && npm install -g @anthropic-ai/claude-code
+    && npm install -g @anthropic-ai/claude-code \
+    && npm cache clean --force
 
 RUN curl -fsSL \
     https://github.com/maquina-app/fragua-tools/releases/latest/download/install.sh | sh
@@ -159,7 +158,18 @@ RUN curl -fsSL \
 RUN curl -fsSL \
     https://github.com/maquina-app/recuerd0-cli/releases/latest/download/install.sh | sh
 
-RUN npm install -g @openai/codex
+RUN curl -fsSL \
+    https://github.com/maquina-app/equipr/releases/latest/download/install.sh | sh
+
+RUN npm install -g @openai/codex \
+    && npm cache clean --force
+
+RUN npm install -g agent-browser \
+    && npx --yes playwright install --with-deps chromium \
+    && ln -sf "$(find /root/.cache/ms-playwright -name chrome -type f -path '*chrome-linux*' | head -n1)" /usr/local/bin/chromium \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/*
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/local/bin/chromium
 
 RUN gh extension install basecamp/gh-signoff
 
@@ -177,7 +187,12 @@ RUN mkdir -p \
     && ln -s /fragua-secrets/ssh /root/.ssh \
     && chmod 700 /fragua-secrets/ssh \
     && rm -rf /root/.agents \
-    && ln -s /fragua-config/agents /root/.agents
+    && ln -s /fragua-config/agents /root/.agents \
+    && rm -rf /root/.claude \
+    && ln -s /fragua-config/claude /root/.claude \
+    && mkdir -p /root/.cache /root/.local/state \
+    && ln -s /fragua-config/equipr/cache /root/.cache/equipr \
+    && ln -s /fragua-config/equipr/state /root/.local/state/equipr
 
 # npm CLI promote/install helper — called by fragua-refresh-cli with <bin> <pkg> <mode>
 RUN cat > /usr/local/bin/fragua-npm-cli <<'EOF'
@@ -210,7 +225,7 @@ EOF
 RUN chmod +x /usr/local/bin/fragua-npm-cli
 
 # Runtime CLI refresh: maintains the /fragua-data (PATH-first) copies. Entrypoint
-# runs it --promote each boot. Keep this file lean (Apple Container Dockerfile limit).
+# runs it --promote each boot. Keep lean (Apple Container Dockerfile limit).
 RUN cat > /usr/local/bin/fragua-refresh-cli <<'EOF'
 #!/bin/sh
 set -e
@@ -219,8 +234,8 @@ for a in "$@"; do
   case "$a" in
     --promote)     MODE=promote ;;
     --if-missing)  MODE=if-missing ;;
-    claude|codex|fragua|recuerd0) ONLY="$a" ;;
-    *) echo "usage: fragua-refresh-cli [--promote|--if-missing] [claude|codex|fragua|recuerd0]" >&2; exit 1 ;;
+    claude|codex|fragua|recuerd0|equipr) ONLY="$a" ;;
+    *) echo "usage: fragua-refresh-cli [--promote|--if-missing] [claude|codex|fragua|recuerd0|equipr]" >&2; exit 1 ;;
   esac
 done
 export NPM_CONFIG_PREFIX=/fragua-data/npm
@@ -258,6 +273,7 @@ static_cli() {  # <name> <install-url> — single static binary CLIs (fragua, re
 }
 static_cli fragua   https://github.com/maquina-app/fragua-tools/releases/latest/download/install.sh
 static_cli recuerd0 https://github.com/maquina-app/recuerd0-cli/releases/latest/download/install.sh
+static_cli equipr   https://github.com/maquina-app/equipr/releases/latest/download/install.sh
 
 if want claude; then fragua-npm-cli claude @anthropic-ai/claude-code "$MODE"; fi
 if want codex;  then fragua-npm-cli codex  @openai/codex             "$MODE"; fi
@@ -267,18 +283,14 @@ command -v fragua && fragua --version 2>/dev/null || true
 command -v claude && claude --version 2>/dev/null || true
 command -v codex && codex --version 2>/dev/null || true
 command -v recuerd0 && recuerd0 version 2>/dev/null || true
+command -v equipr && equipr --version 2>/dev/null || true
 EOF
 RUN chmod +x /usr/local/bin/fragua-refresh-cli
 
-# ── Entrypoint — load the Claude token + wire the runtime-toolchain volume ─────
-# 1. Claude token: write it into the fragua-config volume once during setup and
-#    the agent picks it up on every run — no --env needed. An explicit
-#    --env CLAUDE_CODE_OAUTH_TOKEN still wins if you'd rather pass it at runtime.
-# 2. Toolchain redirect: point gem/npm installs at the rw /fragua-data volume so
-#    runtime `gem install` / `bundle install` / `npm install -g` survive a
-#    rebuild. This is set HERE (runtime), not as a build ENV — otherwise the
-#    build-time installs above would target a path the empty volume later hides,
-#    and `--refresh-cli` could not refresh them.
+# ── Entrypoint — load Claude token + wire the runtime-toolchain volume ─────────
+# Toolchain redirect is set HERE (runtime), not as build ENV, so build-time
+# gem/npm installs land in the image (refreshable), not the empty volume that
+# would hide them. An explicit --env CLAUDE_CODE_OAUTH_TOKEN wins. See SETUP.md.
 RUN cat > /usr/local/bin/fragua-entrypoint.sh <<'EOF'
 #!/bin/sh
 set -e

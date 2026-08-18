@@ -83,8 +83,7 @@ RUN apt-get update && apt-get install -y \
     # ruby-ldap, enterprise auth
     libsasl2-dev \
     \
-    # optional — uncomment if needed:
-    # libgdal-dev         # PostGIS / heavy geospatial (+150MB)
+    # libgdal-dev  # PostGIS / heavy geospatial (+150MB) — uncomment if needed
     \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -116,7 +115,8 @@ node = "26"
 EOF
 
 RUN mise install --yes \
-    && mise reshim
+    && mise reshim \
+    && rm -rf /root/.cache/mise
 
 # ── Bundler — system libs for native gems ────────────────────────────────────
 RUN bundle config set --global build.nokogiri \
@@ -139,7 +139,8 @@ RUN gem install bundler \
 ARG CLI_REFRESH=0
 
 RUN echo "cli refresh=${CLI_REFRESH}" \
-    && npm install -g @anthropic-ai/claude-code
+    && npm install -g @anthropic-ai/claude-code \
+    && npm cache clean --force
 
 RUN curl -fsSL \
     https://github.com/maquina-app/fragua-tools/releases/latest/download/install.sh | sh
@@ -147,7 +148,20 @@ RUN curl -fsSL \
 RUN curl -fsSL \
     https://github.com/maquina-app/recuerd0-cli/releases/latest/download/install.sh | sh
 
-RUN npm install -g @openai/codex
+RUN curl -fsSL \
+    https://github.com/maquina-app/equipr/releases/latest/download/install.sh | sh
+
+RUN npm install -g @openai/codex \
+    && npm cache clean --force
+
+# agent-browser — Chrome for Testing has no Linux arm64 build, so use Playwright's
+# Chromium (arm64 + amd64) and point agent-browser at it via AGENT_BROWSER_EXECUTABLE_PATH.
+RUN npm install -g agent-browser \
+    && npx --yes playwright install --with-deps chromium \
+    && ln -sf "$(find /root/.cache/ms-playwright -name chrome -type f -path '*chrome-linux*' | head -n1)" /usr/local/bin/chromium \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/*
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/local/bin/chromium
 
 RUN gh extension install basecamp/gh-signoff
 
@@ -165,7 +179,12 @@ RUN mkdir -p \
     && ln -s /fragua-secrets/ssh /root/.ssh \
     && chmod 700 /fragua-secrets/ssh \
     && rm -rf /root/.agents \
-    && ln -s /fragua-config/agents /root/.agents
+    && ln -s /fragua-config/agents /root/.agents \
+    && rm -rf /root/.claude \
+    && ln -s /fragua-config/claude /root/.claude \
+    && mkdir -p /root/.cache /root/.local/state \
+    && ln -s /fragua-config/equipr/cache /root/.cache/equipr \
+    && ln -s /fragua-config/equipr/state /root/.local/state/equipr
 
 # npm CLI promote/install helper — called by fragua-refresh-cli with <bin> <pkg> <mode>
 RUN cat > /usr/local/bin/fragua-npm-cli <<'EOF'
@@ -207,8 +226,8 @@ for a in "$@"; do
   case "$a" in
     --promote)     MODE=promote ;;
     --if-missing)  MODE=if-missing ;;
-    claude|codex|fragua|recuerd0) ONLY="$a" ;;
-    *) echo "usage: fragua-refresh-cli [--promote|--if-missing] [claude|codex|fragua|recuerd0]" >&2; exit 1 ;;
+    claude|codex|fragua|recuerd0|equipr) ONLY="$a" ;;
+    *) echo "usage: fragua-refresh-cli [--promote|--if-missing] [claude|codex|fragua|recuerd0|equipr]" >&2; exit 1 ;;
   esac
 done
 export NPM_CONFIG_PREFIX=/fragua-data/npm
@@ -246,6 +265,7 @@ static_cli() {  # <name> <install-url> — single static binary CLIs (fragua, re
 }
 static_cli fragua   https://github.com/maquina-app/fragua-tools/releases/latest/download/install.sh
 static_cli recuerd0 https://github.com/maquina-app/recuerd0-cli/releases/latest/download/install.sh
+static_cli equipr   https://github.com/maquina-app/equipr/releases/latest/download/install.sh
 
 if want claude; then fragua-npm-cli claude @anthropic-ai/claude-code "$MODE"; fi
 if want codex;  then fragua-npm-cli codex  @openai/codex             "$MODE"; fi
@@ -255,6 +275,7 @@ command -v fragua && fragua --version 2>/dev/null || true
 command -v claude && claude --version 2>/dev/null || true
 command -v codex && codex --version 2>/dev/null || true
 command -v recuerd0 && recuerd0 version 2>/dev/null || true
+command -v equipr && equipr --version 2>/dev/null || true
 EOF
 RUN chmod +x /usr/local/bin/fragua-refresh-cli
 
