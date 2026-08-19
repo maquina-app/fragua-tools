@@ -3,8 +3,10 @@
 # Build the Fragua agent image and (optionally) push it to GHCR.
 # For Docker / OrbStack.
 #
-# A single-arch build is also tagged `local/fragua:latest` (LOCAL_TAG) — the name
+# The build is also tagged `local/fragua:latest` (LOCAL_TAG) — the name
 # compose.yaml / fragua-host run — so a rebuild is immediately what they use.
+# Multi-arch builds can't be loaded locally, so they push and then pull this
+# host's variant back, leaving LOCAL_TAG on the fresh image either way.
 #
 # Usage:
 #   ./build.sh                          # build + push  ghcr.io/maquina-app/fragua-docker:latest
@@ -12,7 +14,8 @@
 #   ./build.sh --no-cache               # force a clean rebuild from scratch
 #   ./build.sh --refresh-cli            # re-fetch the latest Claude Code + fragua CLI (skips cache for those layers)
 #   ./build.sh --platform linux/amd64,linux/arm64
-#                                       # multi-arch build via buildx (pushes directly)
+#                                       # multi-arch via buildx: pushes, then pulls
+#                                       # this host's variant back for LOCAL_TAG
 #
 # Authentication for the push (only needed once per machine):
 #   export GITHUB_USER=<your-github-username>
@@ -45,7 +48,7 @@ while [[ $# -gt 0 ]]; do
     --no-cache)       NO_CACHE="--no-cache" ;;
     --refresh-cli)    REFRESH_ARG="--build-arg CLI_REFRESH=$(date +%s)" ;;
     --platform)       PLATFORM="$2"; shift ;;
-    -h|--help)        sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help)        sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
   shift
@@ -67,6 +70,50 @@ maybe_login() {
   fi
 }
 
+# ── Local tag sync (multi-arch path) ──────────────────────────────────────────
+# buildx --push writes straight to the registry and never touches the local
+# image store, so LOCAL_TAG would still point at whatever was there before. When
+# the platform list includes this host, pull that variant back and retag it, so
+# compose.yaml / fragua-host run what was just built instead of a stale image.
+host_platform() {
+  "$ENGINE" version --format '{{.Server.Os}}/{{.Server.Arch}}' 2>/dev/null
+}
+
+sync_local_tag_from_registry() {
+  local host plat matched=0
+  host="$(host_platform)"
+  if [[ -z "$host" ]]; then
+    echo "warn: could not detect the host platform; '${LOCAL_TAG}' left as-is." >&2
+    echo "      pull ${REF} and retag it manually if you want to run it here." >&2
+    return 0
+  fi
+
+  # Tolerate variants in either direction (linux/arm64 vs linux/arm64/v8).
+  local plats; IFS=',' read -ra plats <<< "$PLATFORM"
+  for plat in "${plats[@]}"; do
+    plat="${plat// /}"
+    if [[ "$plat" == "$host" || "$plat" == "$host"/* || "$host" == "$plat"/* ]]; then
+      matched=1; break
+    fi
+  done
+
+  if [[ "$matched" -eq 0 ]]; then
+    echo "==> ${PLATFORM} doesn't include this host (${host}) — nothing to pull."
+    echo "    '${LOCAL_TAG}' still points at the previous build."
+    return 0
+  fi
+
+  echo "==> Pulling the ${host} variant of ${REF}"
+  if ! "$ENGINE" pull --platform "$host" "$REF"; then
+    echo "warn: pull failed; '${LOCAL_TAG}' left as-is." >&2
+    return 0
+  fi
+  if [[ -n "$LOCAL_TAG" && "$LOCAL_TAG" != "$REF" ]]; then
+    echo "==> Tagging ${REF} as ${LOCAL_TAG}"
+    "$ENGINE" tag "$REF" "$LOCAL_TAG"
+  fi
+}
+
 # ── Multi-arch path (buildx builds and pushes in one step) ────────────────────
 if [[ -n "$PLATFORM" ]]; then
   if [[ "$PUSH" -eq 0 ]]; then
@@ -82,8 +129,7 @@ if [[ -n "$PLATFORM" ]]; then
     --push \
     .
   echo "==> Done: ${REF} (${PLATFORM})"
-  echo "    (multi-arch buildx pushes directly and can't load locally, so"
-  echo "     '${LOCAL_TAG}' was not tagged — pull it if you need to run it here)"
+  sync_local_tag_from_registry
   exit 0
 fi
 

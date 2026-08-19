@@ -133,6 +133,11 @@ to GHCR by default.
 
 # build with Docker instead of Apple Container
 ./build.sh --engine docker
+
+# multi-arch build + push via buildx. Needs --engine docker; Apple Container
+# has no buildx. Pulls this host's variant back afterwards so
+# local/fragua:latest is still the image you just built.
+./build.sh --engine docker --platform linux/amd64,linux/arm64
 ```
 
 > `--refresh-cli` busts only the Claude Code + fragua install layers (and the
@@ -157,8 +162,13 @@ export GITHUB_TOKEN=<PAT with write:packages scope>
 ### Notes
 
 - **Architecture** — building on Apple silicon produces a `linux/arm64` image.
-  It runs natively under Apple Container and on arm64 Docker hosts. amd64 hosts
-  need a separately built/multi-arch image.
+  It runs natively under Apple Container and on arm64 Docker hosts. For amd64
+  hosts, publish a multi-arch manifest with
+  `./build.sh --engine docker --platform linux/amd64,linux/arm64` (Apple
+  Container has no buildx, so the multi-arch path needs Docker).
+  Getting this wrong fails late rather than loudly: the mismatch is only a
+  `WARNING` on `docker run`, and the image then runs under QEMU, where Chromium
+  aborts (`GPU process isn't usable`) instead of failing cleanly.
 - **Package visibility** — the first push creates a **private** package. Make it
   public under
   [`maquina-app` packages](https://github.com/orgs/maquina-app/packages) if you

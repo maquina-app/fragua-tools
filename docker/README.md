@@ -129,7 +129,9 @@ to GHCR by default.
 # re-fetch the latest Claude Code + fragua CLI (keeps the heavy layers cached)
 ./build.sh --refresh-cli
 
-# multi-arch build + push via buildx (Docker only)
+# multi-arch build + push via buildx (Docker only). Pushes straight to the
+# registry, then pulls this host's variant back so local/fragua:latest is
+# still the image you just built.
 ./build.sh --platform linux/amd64,linux/arm64
 ```
 
@@ -156,7 +158,10 @@ export GITHUB_TOKEN=<PAT with write:packages scope>
 - **Architecture** — a plain `./build.sh` builds for your host arch (arm64 on
   Apple silicon). Use `--platform linux/amd64,linux/arm64` to publish a
   multi-arch manifest so both Intel and ARM hosts can pull the same tag. This is
-  the main advantage over the Apple Container build, which is arm64-only.
+  the main advantage over the Apple Container build.
+  Publishing single-arch is easy to do by accident and fails late: the mismatch
+  is only a `WARNING` on `docker run`, and the image then runs under QEMU, where
+  Chromium aborts (`GPU process isn't usable`) rather than failing cleanly.
 - **Package visibility** — the first push creates a **private** package. Make it
   public under
   [`maquina-app` packages](https://github.com/orgs/maquina-app/packages) if you

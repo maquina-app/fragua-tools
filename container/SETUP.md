@@ -455,7 +455,12 @@ container volume delete fragua-workdir fragua-config fragua-secrets fragua-data
   passphrase, which can't be entered in the headless agent. Use a passphrase-less
   key, or switch to **Option B** (a fresh key with `-N ""`).
 - **`linux/amd64` host can't run the image** — images built on Apple silicon are
-  `linux/arm64`; build/publish a matching arch for x86 hosts.
+  `linux/arm64`. Publish a multi-arch manifest with
+  `./build.sh --engine docker --platform linux/amd64,linux/arm64` (the
+  multi-arch path needs Docker's buildx; Apple Container has none). Symptom to
+  watch for: `docker run` prints only a platform `WARNING`, then Chromium dies
+  with `GPU process isn't usable` / `qemu: uncaught target signal 6 (Aborted)`.
+  Confirm with `docker image inspect local/fragua:latest --format '{{.Architecture}}'`.
 
 ---
 

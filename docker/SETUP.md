@@ -418,7 +418,11 @@ docker volume rm fragua-workdir fragua-config fragua-secrets fragua-data
 - **Agent doesn't appear online** — confirm `fragua login` succeeded inside the
   container (Phase 3c) and that the `fragua-config` volume is mounted in Phase 4.
 - **`linux/amd64` host can't run an arm64 image** — publish a multi-arch image
-  with `./build.sh --platform linux/amd64,linux/arm64`.
+  with `./build.sh --platform linux/amd64,linux/arm64`, which also pulls this
+  host's variant back and retags `local/fragua:latest`. Symptom to watch for:
+  `docker run` prints only a platform `WARNING`, then Chromium dies with
+  `GPU process isn't usable` / `qemu: uncaught target signal 6 (Aborted)`.
+  Confirm with `docker image inspect local/fragua:latest --format '{{.Architecture}}'`.
 
 ---
 
