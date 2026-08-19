@@ -199,8 +199,12 @@ RUN cat > /usr/local/bin/fragua-npm-cli <<'EOF'
 #!/bin/sh
 set -e
 bin=$1; pkg=$2; mode=${3:-all}
-base=/usr/local/bin/$bin; vol=/fragua-data/npm/bin/$bin
-bpkg=/usr/local/lib/node_modules/$pkg
+# The image's npm globals live under whatever prefix mise set up, not
+# /usr/local. Ask npm with the volume prefix unset so we resolve the image
+# baseline instead of the volume copy we are about to replace.
+ipfx=$(NPM_CONFIG_PREFIX= npm prefix -g 2>/dev/null || true); ipfx=${ipfx:-/usr/local}
+base=$ipfx/bin/$bin; bpkg=$ipfx/lib/node_modules/$pkg
+vol=/fragua-data/npm/bin/$bin
 vpkg=/fragua-data/npm/lib/node_modules/$pkg; do_net=0
 ver() { [ -x "$1" ] || return 0; { "$1" --version 2>/dev/null || "$1" version 2>/dev/null; } | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1; }
 is_newer() { [ -n "$1" ] || return 1; [ -n "$2" ] || return 0; [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
@@ -209,18 +213,22 @@ case "$mode" in
   if-missing) [ -x "$vol" ] || do_net=1 ;;
   promote)
     bv=$(ver "$base"); vv=$(ver "$vol")
-    if [ -x "$base" ] && { [ ! -e "$vol" ] || is_newer "$bv" "$vv"; }; then
+    if [ -e "$base" ] && { [ ! -e "$vol" ] || is_newer "$bv" "$vv"; }; then
       echo "==> promoting $bin ${vv:-(absent)} -> ${bv:-?} from the image baseline"
       rm -rf "$vpkg"; mkdir -p "$(dirname "$vpkg")"
       cp -a "$bpkg" "$(dirname "$vpkg")/"
-      entry=$(readlink -f "$base" 2>/dev/null || true)
-      case "$entry" in
-        "$bpkg"/*) ln -sf "../lib/node_modules/$pkg/${entry#"$bpkg"/}" "$vol" ;;
+      # The baseline bin is a relative symlink into its own node_modules; reuse
+      # that target verbatim so the volume link resolves inside the volume.
+      tgt=$(readlink "$base" 2>/dev/null || true)
+      case "$tgt" in
+        ../lib/node_modules/*) ln -sf "$tgt" "$vol" ;;
         *) cp -a "$base" "$vol" ;;
       esac
     fi ;;
 esac
-[ "$do_net" = 1 ] && npm install -g "$pkg"
+# Must not be a bare `[ ... ] && cmd`: that returns 1 when do_net=0 and `set -e`
+# would abort the caller mid-way through its CLI list.
+if [ "$do_net" = 1 ]; then npm install -g "$pkg"; fi
 EOF
 RUN chmod +x /usr/local/bin/fragua-npm-cli
 
@@ -240,6 +248,35 @@ for a in "$@"; do
 done
 export NPM_CONFIG_PREFIX=/fragua-data/npm
 mkdir -p /fragua-data/npm/lib/node_modules/@anthropic-ai /fragua-data/npm/lib/node_modules/@openai /fragua-data/npm/bin /fragua-data/bin
+
+# The volume holds arch-specific binaries. If it was filled on another arch
+# (image rebuilt or pulled for a different platform) those copies are junk:
+# dynamically linked ones fail outright, static ones silently run under QEMU.
+# Drop them so this run re-promotes from the image baseline.
+ARCH=$(uname -m); STAMP=/fragua-data/.arch
+mach() { od -An -tx1 -j18 -N2 "$1" 2>/dev/null | tr -d ' \n'; }
+stale=0
+if [ -f "$STAMP" ]; then
+  [ "$(cat "$STAMP" 2>/dev/null)" = "$ARCH" ] || stale=1
+elif [ -e /fragua-data/bin/fragua ] && [ -e /usr/local/bin/fragua ]; then
+  # No stamp: volume predates it, so compare ELF machine against the baseline.
+  [ "$(mach /fragua-data/bin/fragua)" = "$(mach /usr/local/bin/fragua)" ] || stale=1
+fi
+if [ "$stale" = 1 ]; then
+  echo "==> volume CLI copies are for another arch - clearing so this boot re-promotes"
+  rm -rf /fragua-data/npm/lib/node_modules/@anthropic-ai/claude-code \
+         /fragua-data/npm/lib/node_modules/@openai/codex \
+         /fragua-data/npm/bin/claude /fragua-data/npm/bin/codex \
+         /fragua-data/bin/fragua /fragua-data/bin/recuerd0 /fragua-data/bin/equipr
+fi
+printf '%s\n' "$ARCH" > "$STAMP" 2>/dev/null || true
+# Native gem extensions are arch-specific too, but rebuilding them is per-project
+# work (bundle install), so say so rather than deleting someone's gems.
+if [ -d /fragua-data/gems/extensions ] \
+   && ls /fragua-data/gems/extensions 2>/dev/null | grep -qv "^${ARCH}-"; then
+  echo "warn: /fragua-data/gems has extensions built for another arch;" >&2
+  echo "      run 'bundle install' in affected projects to rebuild them." >&2
+fi
 
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 
