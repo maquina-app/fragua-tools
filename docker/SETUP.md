@@ -402,7 +402,7 @@ needs its own. The backup pauses to confirm both:
 ```
 fragua config.toml — confirm what this archive should record
 (press Enter to keep the current value; the live volume is unchanged)
-  runner name [f7b3eb0a-ff04-42f6-80ec-606eb1ac5c57]:
+  runner name [mac-mini]:
   concurrency — how many processes [3]:
 ```
 
@@ -478,7 +478,6 @@ prompt.
 > and always restore cleanly.
 
 ---
-
 
 ## Troubleshooting
 

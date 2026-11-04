@@ -390,6 +390,132 @@ container volume delete fragua-workdir fragua-config fragua-secrets fragua-data
 
 ---
 
+## Backing up your credentials — and moving them to another machine
+
+Everything that would force you through the Phase 3 setup again — the gh token,
+the SSH keypair, the Claude/Codex/fragua tokens, your Git identity and the
+recuerd0 config — lives in the `fragua-config` + `fragua-secrets` volumes.
+`fragua-backup` packs exactly those files into **one archive** you can `scp`
+anywhere and restore into another machine's volumes. Everything else in the
+volumes is disposable: the workdir is re-cloned and gems / node modules / CLIs
+re-install themselves.
+
+```bash
+./fragua-backup                     # → ./fragua-backups/fragua-backup-<ts>.tgz
+./fragua-backup --encrypt           # → ...tgz.gpg, asks for a passphrase
+./fragua-backup -o ~/fragua.tgz     # write it where you want
+```
+
+**Stop the agent first** (`container stop fragua-agent`). An Apple Container volume
+is a block device that attaches to one VM at a time, so the script refuses to run
+while a container is using these volumes. Both are mounted **read-only** for the
+backup. Files that don't exist yet (a tool you never logged into) are skipped with
+a note rather than failing. What goes in:
+
+| Source                                  | Holds                          |
+| --------------------------------------- | ------------------------------ |
+| `/fragua-secrets/gh/*`                  | gh CLI token + `hosts.yml`     |
+| `/fragua-secrets/ssh/*`                 | SSH keypair used for `git push`|
+| `/fragua-config/claude-oauth-token`     | Claude Code token              |
+| `/fragua-config/codex/config.toml`      | Codex CLI config               |
+| `/fragua-config/codex/auth.json`        | Codex CLI credentials          |
+| `/fragua-config/fragua/config.toml`     | fragua CLI config              |
+| `/fragua-config/fragua/token`           | fragua agent token             |
+| `/fragua-config/gitconfig`              | Git identity + credential helper |
+| `/fragua-config/recuerd0/config.yaml`   | recuerd0 config                |
+
+Inside, the archive mirrors the mount points (`fragua-config/…`,
+`fragua-secrets/…`) plus a `MANIFEST.txt`, so `tar tzf` tells you what you have
+and you can pull a single file out by hand.
+
+### The runner name + process count
+
+`fragua/config.toml` carries two fields that are per-machine: `runner_name` and
+`concurrency` (how many processes the agent runs). **Two runners sharing one
+name will compete for the same work**, so a clone destined for a second machine
+needs its own. The backup pauses to confirm both:
+
+```
+fragua config.toml — confirm what this archive should record
+(press Enter to keep the current value; the live volume is unchanged)
+  runner name [mac-mini]:
+  concurrency — how many processes [3]:
+```
+
+Only the **archive copy** is edited — the volume is read-only throughout, so
+this machine's runner keeps its own identity. For scripts:
+
+```bash
+./fragua-backup --encrypt --runner-name mac-mini --concurrency 2    # set both
+./fragua-backup --yes                                               # keep both
+```
+
+Anything other than a positive integer for `concurrency` is rejected. A restore
+prints the runner name and process count it's about to write.
+
+### Encryption
+
+`--encrypt` produces a `.tgz.gpg` (gpg symmetric, AES-256) and prompts for a
+passphrase twice. Use it for anything that leaves the machine — an unencrypted
+archive holds your **SSH private key and every API token in plaintext**.
+
+The script drives gpg with `--pinentry-mode loopback` and an explicit passphrase
+fd, so it needs neither `GPG_TTY` nor a pinentry program and behaves the same
+over ssh or in a script. Encrypting by hand with a pipe does *not*:
+
+```bash
+tar czf - -C dir . | gpg -c > out.gpg
+# gpg: problem with the agent: Inappropriate ioctl for device
+```
+
+gpg's data is coming from the pipe, so pinentry has to find a terminal on its
+own — and with `GPG_TTY` unset it can't. Either `export GPG_TTY=$(tty)` (worth
+adding to `~/.zshrc` regardless) or just use `./fragua-backup --encrypt`.
+
+### Restoring / cloning to another machine
+
+The target needs Apple Container, the fragua image, this script, and the four volumes —
+nothing else. No Phase 3 logins, no `claude setup-token`.
+
+```bash
+# 1. on this Mac
+container stop fragua-agent
+./fragua-backup --encrypt --runner-name mac-mini --concurrency 2
+container start fragua-agent
+scp fragua-backups/fragua-backup-<ts>.tgz.gpg you@other-host:~/
+
+# 2. on the other machine
+container volume create fragua-config && container volume create fragua-secrets
+container volume create fragua-workdir && container volume create fragua-data
+./fragua-backup --restore ~/fragua-backup-<ts>.tgz.gpg    # prompts for passphrase
+# then start the agent (Phase 4b)
+```
+
+Restoring over an existing setup works the same — stop the agent first:
+
+```bash
+container stop fragua-agent
+./fragua-backup --restore ./fragua-backups/<file>   # confirms before overwriting
+container start fragua-agent
+```
+
+Restore re-applies the modes the tools require (`700` on `ssh/`, `600` on the
+private key and tokens) and makes everything `root`-owned, which a `tar`
+round-trip across machines otherwise loses. It detects encryption from the
+file's contents, so a renamed archive still works, and it also accepts a folder
+produced by an earlier version of this script. `--yes` skips the confirmation
+prompt.
+
+> The same SSH key and gh token now exist on two machines — both push to GitHub
+> as you. That's usually the point, but revoke/rotate if a machine is retired.
+
+> If `gh` reports "not authenticated" after a restore onto a much newer image,
+> the `hosts.yml` schema changed; re-run `gh auth login --insecure-storage` in a
+> `--bash` session. The SSH key, Claude, Codex and fragua tokens are plain files
+> and always restore cleanly.
+
+---
+
 ## Troubleshooting
 
 - **`container system start` hangs on "Verifying machine API server"** — the
@@ -474,7 +600,7 @@ runtime), `fragua-workdir`, and the new `fragua-data`. Migrate in three steps.
 ### 1. Back up every existing volume to the host
 
 Mount all five old volumes read-only plus the current host directory, and tar each
-one out. Tarballs land in `./fragua-backup/` on your Mac.
+one out. Tarballs land in `./fragua-backups/` on your Mac.
 
 ```bash
 container run --rm -it \
@@ -485,11 +611,11 @@ container run --rm -it \
   -v fragua-workdir:/v/workdir:ro \
   -v "$PWD":/backup:rw \
   local/fragua:latest bash -c '
-    mkdir -p /backup/fragua-backup
+    mkdir -p /backup/fragua-backups
     for v in config gh ssh claude workdir; do
-      tar czf /backup/fragua-backup/$v.tgz -C /v/$v . ;
+      tar czf /backup/fragua-backups/$v.tgz -C /v/$v . ;
     done
-    ls -la /backup/fragua-backup'
+    ls -la /backup/fragua-backups'
 ```
 
 Confirm `config.tgz`, `gh.tgz`, `ssh.tgz`, `claude.tgz` exist and are non-empty
@@ -517,7 +643,7 @@ container volume create fragua-data
 container run --rm -it \
   -v fragua-config:/fragua-config:rw \
   -v fragua-secrets:/fragua-secrets:rw \
-  -v "$PWD/fragua-backup":/backup:ro \
+  -v "$PWD/fragua-backups":/backup:ro \
   local/fragua:latest bash -c '
     tar xzf /backup/config.tgz -C /fragua-config
     mkdir -p /fragua-config/claude /fragua-secrets/gh /fragua-secrets/ssh

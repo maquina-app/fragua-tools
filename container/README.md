@@ -93,6 +93,34 @@ must be registered on GitHub). The Claude token is generated on the host once
 (`claude setup-token`) and written into `fragua-config`; the image's entrypoint
 loads it on every run. See the guide for the exact steps.
 
+## Backing up credentials
+
+`./fragua-backup` packs the files that would otherwise force a full re-setup — the
+gh token, SSH keypair, Claude/Codex/fragua tokens, `gitconfig` and the recuerd0
+config — into **one archive** you can copy to another machine and restore into
+its volumes:
+
+```bash
+./fragua-backup                                  # → ./fragua-backups/fragua-backup-<ts>.tgz
+./fragua-backup --encrypt                        # → ...tgz.gpg (AES-256, prompts for a passphrase)
+./fragua-backup --restore ~/fragua-backup-<ts>.tgz.gpg   # write it into the volumes
+```
+
+Stop the agent first — a volume attaches to one VM at a time, so the script refuses
+to run while one is using it. Missing files (a tool you never logged into) are
+skipped, not fatal. The restore re-applies the modes the tools require (`700` on `ssh/`, `600` on the
+private key and tokens) and root ownership.
+
+A backup pauses to confirm the two fragua fields that are per-machine — the
+runner name and `concurrency` (how many processes) — and records your answers in
+the archive's copy of `fragua/config.toml`; the live volume is untouched. Two
+runners must not share a name, so set a fresh one when cloning to a second
+machine: `--runner-name NAME --concurrency N` (or `--yes` to keep both).
+
+Cloning a whole setup to another machine is then: `--encrypt`, `scp`, create the
+four volumes there, `--restore`. No re-login, no `claude setup-token`. Details in
+[SETUP.md](./SETUP.md#backing-up-your-credentials--and-moving-them-to-another-machine).
+
 ## Updating the CLIs without a rebuild
 
 The `claude` and `fragua` CLIs live in the `fragua-data` volume and take
