@@ -8,6 +8,12 @@ plugins/
 # Volume backups — contain the gh token + SSH private key in plaintext. Never commit.
 fragua-backup/
 **/fragua-backup/
+fragua-backups/
+**/fragua-backups/
+fragua-backup*.tgz
+fragua-backup*.tgz.gpg
+**/fragua-backup*.tgz
+**/fragua-backup*.tgz.gpg
 
 # Local launcher script
 fragua-host

@@ -1,0 +1,388 @@
+#!/usr/bin/env bash
+#
+# Back up (and restore) the Fragua agent's credentials + config as ONE FILE you
+# can scp to another machine and restore into its Docker volumes.
+#
+# What goes in it (everything else in the volumes is disposable — the agent
+# re-clones its workdir and re-installs gems / node modules / CLIs):
+#
+#   fragua-secrets:/fragua-secrets/gh/*                 gh CLI token + hosts.yml
+#   fragua-secrets:/fragua-secrets/ssh/*                SSH keypair (git push)
+#   fragua-config:/fragua-config/claude-oauth-token     Claude Code token
+#   fragua-config:/fragua-config/codex/config.toml      Codex CLI config
+#   fragua-config:/fragua-config/codex/auth.json        Codex CLI credentials
+#   fragua-config:/fragua-config/fragua/config.toml     fragua CLI config
+#   fragua-config:/fragua-config/fragua/token           fragua agent token
+#   fragua-config:/fragua-config/gitconfig              Git identity
+#   fragua-config:/fragua-config/recuerd0/config.yaml   recuerd0 config
+#
+# Missing files are skipped with a note, not treated as an error — a fresh setup
+# won't have every tool configured.
+#
+# On backup it asks you to confirm the two fragua fields that are per-machine —
+# the runner name and the process count (`concurrency`) — and records your
+# answers in the ARCHIVE's copy of fragua/config.toml. Two runners sharing one
+# name will fight over work, so set a fresh name when you're cloning to a second
+# machine. The live volume is mounted read-only and is never modified.
+#
+# Usage:
+#   ./fragua-backup                        # → ./fragua-backups/fragua-backup-<ts>.tgz
+#   ./fragua-backup --encrypt              # → ...tgz.gpg, asks for a passphrase
+#   ./fragua-backup -o ~/fragua.tgz        # write the archive where you want it
+#   ./fragua-backup --runner-name mac-mini --concurrency 4
+#                                      # set the fragua fields non-interactively
+#   ./fragua-backup --yes                  # keep them as-is, no prompts
+#   ./fragua-backup --restore FILE         # restore a .tgz / .tgz.gpg into the volumes
+#   ./fragua-backup --restore FILE --yes   # …without the confirmation prompt
+#
+# Moving it to another machine:
+#   ./fragua-backup --encrypt                          # on this Mac
+#   scp fragua-backups/fragua-backup-<ts>.tgz.gpg  you@other:~/
+#   # on the other machine (needs docker, the fragua image, and this script):
+#   docker volume create fragua-config && docker volume create fragua-secrets
+#   docker volume create fragua-workdir && docker volume create fragua-data
+#   ./fragua-backup --restore ~/fragua-backup-<ts>.tgz.gpg
+#
+# Env overrides: IMAGE (default local/fragua:latest), ENGINE (default docker).
+#
+# ⚠️  An UNENCRYPTED archive holds your SSH PRIVATE KEY and every API token in
+#     plaintext. `--encrypt` (gpg symmetric, AES-256) is strongly preferred for
+#     anything that leaves this machine. `fragua-backups/` is in .gitignore.
+
+set -euo pipefail
+
+IMAGE="${IMAGE:-local/fragua:latest}"
+ENGINE="${ENGINE:-docker}"
+
+CONFIG_VOL="${CONFIG_VOL:-fragua-config}"
+SECRETS_VOL="${SECRETS_VOL:-fragua-secrets}"
+
+MODE="backup"
+TARGET=""
+ASSUME_YES=0
+ENCRYPT=0
+RUNNER_NAME=""
+CONCURRENCY=""
+
+usage() { awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"; }
+
+# Read/rewrite the two fragua fields worth reviewing per-machine. Keys absent
+# from the file are appended, so an older config.toml still ends up complete.
+toml_get() { # file key
+  awk -v k="$2" '
+    $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
+      sub(/^[^=]*=[[:space:]]*/, ""); gsub(/"/, ""); sub(/[[:space:]]+$/, "")
+      print; exit
+    }' "$1"
+}
+
+toml_set_runner() { # file runner_name concurrency
+  awk -v rn="$2" -v cc="$3" '
+    /^[[:space:]]*runner_name[[:space:]]*=/ { print "runner_name = \"" rn "\""; seen_rn=1; next }
+    /^[[:space:]]*concurrency[[:space:]]*=/ { print "concurrency = " cc; seen_cc=1; next }
+    { print }
+    END {
+      if (!seen_rn) print "runner_name = \"" rn "\""
+      if (!seen_cc) print "concurrency = " cc
+    }' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output)    TARGET="${2:?--output needs a path}"; shift ;;
+    --restore)      MODE="restore"; TARGET="${2:?--restore needs a file}"; shift ;;
+    -e|--encrypt)   ENCRYPT=1 ;;
+    --runner-name)  RUNNER_NAME="${2:?--runner-name needs a value}"; shift ;;
+    --concurrency)  CONCURRENCY="${2:?--concurrency needs a number}"; shift ;;
+    -y|--yes)       ASSUME_YES=1 ;;
+    -h|--help)      usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; echo "Try: $0 --help" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+cd "$(dirname "$0")"
+
+command -v "$ENGINE" >/dev/null 2>&1 || { echo "error: '$ENGINE' not found on PATH" >&2; exit 1; }
+
+if ! "$ENGINE" image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "error: image '$IMAGE' not found locally." >&2
+  echo "       Build it (./build.sh --no-push), pull + tag it, or set IMAGE=<other tag>." >&2
+  exit 1
+fi
+
+for v in "$CONFIG_VOL" "$SECRETS_VOL"; do
+  "$ENGINE" volume inspect "$v" >/dev/null 2>&1 || {
+    echo "error: volume '$v' does not exist — create it first:" >&2
+    echo "       $ENGINE volume create $v" >&2
+    exit 1
+  }
+done
+
+# The list the container-side script walks: <volume-mount-name>:<relative path>.
+# Directories are copied whole; missing entries are skipped.
+ITEMS='
+fragua-secrets:gh
+fragua-secrets:ssh
+fragua-config:claude-oauth-token
+fragua-config:codex/config.toml
+fragua-config:codex/auth.json
+fragua-config:fragua/config.toml
+fragua-config:fragua/token
+fragua-config:gitconfig
+fragua-config:recuerd0/config.yaml
+'
+
+# Staging lives beside the archive (a path Docker can always bind-mount) and is
+# removed on any exit — it holds the same plaintext secrets as the archive.
+STAGE=""
+cleanup() { [[ -n "$STAGE" && -d "$STAGE" ]] && rm -rf "$STAGE"; }
+trap cleanup EXIT INT TERM
+
+# gpg is driven with loopback pinentry and an explicit passphrase fd, so it never
+# needs GPG_TTY or a pinentry program — it works the same over ssh, in a pipe, or
+# in a script. (`tar ... | gpg -c` by hand fails with "Inappropriate ioctl for
+# device" when GPG_TTY is unset, because pinentry can't find a terminal.)
+# gpg symmetric output opens with a symkey-ESK packet (0x8c old-format, 0xc3
+# new-format); ASCII-armored output opens with the BEGIN line.
+is_gpg() {
+  local b
+  b="$(od -An -N1 -tx1 < "$1" | tr -d ' \n')"
+  [[ "$b" == "8c" || "$b" == "c3" ]] && return 0
+  head -c 30 "$1" | grep -q -- "-----BEGIN PGP"
+}
+
+read_passphrase() { # prompt confirm(0|1) -> echoes the passphrase
+  local prompt="$1" confirm="$2" p1 p2
+  [[ -t 0 ]] || { echo "error: need a terminal to read the passphrase" >&2; return 1; }
+  read -rsp "$prompt" p1 </dev/tty; echo >&2
+  [[ -n "$p1" ]] || { echo "error: passphrase cannot be empty" >&2; return 1; }
+  if [[ "$confirm" -eq 1 ]]; then
+    read -rsp "Repeat passphrase: " p2 </dev/tty; echo >&2
+    [[ "$p1" == "$p2" ]] || { echo "error: passphrases do not match" >&2; return 1; }
+  fi
+  printf '%s' "$p1"
+}
+
+# ── Backup ────────────────────────────────────────────────────────────────────
+if [[ "$MODE" == "backup" ]]; then
+  command -v tar >/dev/null 2>&1 || { echo "error: tar not found" >&2; exit 1; }
+  if [[ "$ENCRYPT" -eq 1 ]] && ! command -v gpg >/dev/null 2>&1; then
+    echo "error: --encrypt needs gpg (brew install gnupg)" >&2
+    exit 1
+  fi
+
+  STAMP="$(date +%Y%m%d-%H%M%S)"
+  if [[ -z "$TARGET" ]]; then
+    TARGET="$PWD/fragua-backups/fragua-backup-${STAMP}.tgz"
+  elif [[ -d "$TARGET" || "$TARGET" == */ ]]; then
+    TARGET="${TARGET%/}/fragua-backup-${STAMP}.tgz"
+  fi
+  [[ "$ENCRYPT" -eq 1 && "$TARGET" != *.gpg ]] && TARGET="${TARGET}.gpg"
+
+  OUTDIR="$(dirname "$TARGET")"
+  mkdir -p "$OUTDIR"
+  OUTDIR="$(cd "$OUTDIR" && pwd)"
+  TARGET="$OUTDIR/$(basename "$TARGET")"
+
+  STAGE="$OUTDIR/.fragua-stage.$$"
+  mkdir -p "$STAGE"
+  chmod 700 "$STAGE"
+
+  echo "==> Collecting from volumes '$CONFIG_VOL' + '$SECRETS_VOL' (read-only)"
+  "$ENGINE" run --rm \
+    -v "${CONFIG_VOL}:/fragua-config:ro" \
+    -v "${SECRETS_VOL}:/fragua-secrets:ro" \
+    -v "${STAGE}:/stage:rw" \
+    -e "ITEMS=$ITEMS" \
+    --entrypoint bash \
+    "$IMAGE" -c '
+      set -eu
+      copied=0; skipped=0
+      for item in $ITEMS; do
+        vol="${item%%:*}"; rel="${item#*:}"
+        src="/$vol/$rel"
+        if [ ! -e "$src" ]; then
+          echo "    skip (not present)  $vol/$rel"
+          skipped=$((skipped + 1))
+          continue
+        fi
+        dst="/stage/$vol/$rel"
+        mkdir -p "$(dirname "$dst")"
+        rm -rf "$dst"
+        cp -a "$src" "$dst"
+        rm -rf "$dst/lost+found"   # ext4 artifact of the volume root, not config
+        echo "    collected           $vol/$rel"
+        copied=$((copied + 1))
+      done
+      echo "==> $copied collected, $skipped skipped"
+      [ "$copied" -gt 0 ] || { echo "error: nothing to back up" >&2; exit 1; }
+    '
+
+  # ── Review the runner identity stored in the archive ────────────────────────
+  # Each runner needs its own name (two runners sharing one name compete for the
+  # same work), and the process count follows the target host's cores.
+  CFG="$STAGE/fragua-config/fragua/config.toml"
+  if [[ -f "$CFG" ]]; then
+    cur_name="$(toml_get "$CFG" runner_name)"
+    cur_conc="$(toml_get "$CFG" concurrency)"
+    new_name="${RUNNER_NAME:-$cur_name}"
+    new_conc="${CONCURRENCY:-$cur_conc}"
+
+    if [[ -z "${RUNNER_NAME}${CONCURRENCY}" && "$ASSUME_YES" -ne 1 && -t 0 ]]; then
+      echo
+      echo "fragua config.toml — confirm what this archive should record"
+      echo "(press Enter to keep the current value; the live volume is unchanged)"
+      read -r -p "  runner name [${cur_name:-unset}]: " reply
+      if [[ -n "$reply" ]]; then new_name="$reply"; fi
+      read -r -p "  concurrency — how many processes [${cur_conc:-unset}]: " reply
+      if [[ -n "$reply" ]]; then new_conc="$reply"; fi
+    fi
+
+    [[ -n "$new_name" ]] || { echo "error: runner name cannot be empty" >&2; exit 1; }
+    if ! [[ "$new_conc" =~ ^[1-9][0-9]*$ ]]; then
+      echo "error: concurrency must be a positive integer (got '${new_conc:-empty}')" >&2
+      exit 1
+    fi
+
+    toml_set_runner "$CFG" "$new_name" "$new_conc"
+    if [[ "$new_name" != "$cur_name" || "$new_conc" != "$cur_conc" ]]; then
+      echo "==> Archive records runner \"$new_name\", concurrency $new_conc (was \"$cur_name\"/$cur_conc)"
+    else
+      echo "==> Archive records runner \"$new_name\", concurrency $new_conc (unchanged)"
+    fi
+  fi
+
+  {
+    echo "fragua backup"
+    echo "created:  $STAMP"
+    echo "from:     $(hostname)"
+    echo "volumes:  $CONFIG_VOL, $SECRETS_VOL"
+    echo "contents:"
+    ( cd "$STAGE" && find . -type f | sed 's|^\./|  |' | sort )
+  } > "$STAGE/MANIFEST.txt"
+
+  echo "==> Writing $TARGET"
+  if [[ "$ENCRYPT" -eq 1 ]]; then
+    PASS="$(read_passphrase "Passphrase for the archive: " 1)"
+    tar czf - -C "$STAGE" . \
+      | gpg --batch --yes --quiet --pinentry-mode loopback \
+            --passphrase-fd 3 --symmetric --cipher-algo AES256 \
+            -o "$TARGET" 3< <(printf '%s' "$PASS")
+    unset PASS
+  else
+    tar czf "$TARGET" -C "$STAGE" .
+  fi
+  chmod 600 "$TARGET"
+
+  echo
+  echo "Archive contents:"
+  ( cd "$STAGE" && find . -type f ! -name MANIFEST.txt | sed 's|^\./|    |' | sort )
+  echo
+  echo "  $TARGET  ($(du -h "$TARGET" | cut -f1 | tr -d ' '))"
+  echo
+  if [[ "$ENCRYPT" -eq 1 ]]; then
+    echo "Encrypted (gpg symmetric, AES-256). Copy it over and restore:"
+  else
+    echo "⚠️  UNENCRYPTED — holds your SSH private key and API tokens in plaintext."
+    echo "    Re-run with --encrypt before this leaves the machine."
+    echo
+    echo "Copy it over and restore:"
+  fi
+  echo "  scp \"$TARGET\" you@other-host:~/"
+  echo "  # on the other host (needs docker + the fragua image + this script):"
+  echo "  ./fragua-backup --restore ~/$(basename "$TARGET")"
+  exit 0
+fi
+
+# ── Restore ───────────────────────────────────────────────────────────────────
+[[ -e "$TARGET" ]] || { echo "error: '$TARGET' not found" >&2; exit 1; }
+TARGET="$(cd "$(dirname "$TARGET")" && pwd)/$(basename "$TARGET")"
+
+if [[ -d "$TARGET" ]]; then
+  # A folder produced by an earlier version of this script.
+  SRC="$TARGET"
+  echo "==> Restoring from folder $SRC"
+else
+  STAGE="$(dirname "$TARGET")/.fragua-stage.$$"
+  mkdir -p "$STAGE"; chmod 700 "$STAGE"
+  SRC="$STAGE"
+  echo "==> Restoring from $TARGET"
+  # Detect encryption by content, so a renamed archive still works.
+  if [[ "$TARGET" == *.gpg || "$TARGET" == *.asc ]] || is_gpg "$TARGET"; then
+    command -v gpg >/dev/null 2>&1 || { echo "error: this archive is encrypted and gpg is not installed" >&2; exit 1; }
+    PASS="$(read_passphrase "Passphrase for the archive: " 0)"
+    gpg --batch --quiet --pinentry-mode loopback --passphrase-fd 3 \
+        -d "$TARGET" 3< <(printf '%s' "$PASS") | tar xzf - -C "$STAGE"
+    unset PASS
+  else
+    tar xzf "$TARGET" -C "$STAGE"
+  fi
+fi
+
+echo "Archive contents:"
+( cd "$SRC" && find . -type f ! -name MANIFEST.txt | sed 's|^\./|    |' | sort )
+
+CFG="$SRC/fragua-config/fragua/config.toml"
+if [[ -f "$CFG" ]]; then
+  echo
+  echo "fragua settings in this archive: runner \"$(toml_get "$CFG" runner_name)\", concurrency $(toml_get "$CFG" concurrency)"
+  echo "(a second machine needs its OWN runner name — re-run the backup with"
+  echo " --runner-name, or edit config.toml after restoring)"
+fi
+
+RUNNING="$("$ENGINE" ps --filter "volume=${CONFIG_VOL}" --format '{{.Names}}' || true)"
+if [[ -n "$RUNNING" ]]; then
+  echo
+  echo "note: these containers are running and using the volumes: $RUNNING"
+  echo "      Stop them first so the agent picks the restored credentials up:"
+  echo "      $ENGINE stop $RUNNING"
+fi
+
+if [[ "$ASSUME_YES" -ne 1 ]]; then
+  echo
+  read -r -p "This OVERWRITES the credentials above in the volumes. Continue? [y/N] " reply </dev/tty
+  [[ "$reply" == [yY]* ]] || { echo "Aborted."; exit 1; }
+fi
+
+"$ENGINE" run --rm \
+  -v "${CONFIG_VOL}:/fragua-config:rw" \
+  -v "${SECRETS_VOL}:/fragua-secrets:rw" \
+  -v "${SRC}:/backup:ro" \
+  -e "ITEMS=$ITEMS" \
+  --entrypoint bash \
+  "$IMAGE" -c '
+    set -eu
+    restored=0; skipped=0
+    for item in $ITEMS; do
+      vol="${item%%:*}"; rel="${item#*:}"
+      src="/backup/$vol/$rel"
+      if [ ! -e "$src" ]; then
+        echo "    skip (not in archive) $vol/$rel"
+        skipped=$((skipped + 1))
+        continue
+      fi
+      dst="/$vol/$rel"
+      mkdir -p "$(dirname "$dst")"
+      rm -rf "$dst"
+      cp -a "$src" "$dst"
+      chown -R root:root "$dst"
+      echo "    restored              $vol/$rel"
+      restored=$((restored + 1))
+    done
+
+    # Permissions the tools insist on (an archive round-trip can lose them).
+    [ -d /fragua-secrets/ssh ] && chmod 700 /fragua-secrets/ssh || true
+    chmod 600 /fragua-secrets/ssh/id_* 2>/dev/null || true
+    chmod 644 /fragua-secrets/ssh/*.pub 2>/dev/null || true
+    chmod 600 /fragua-secrets/gh/hosts.yml 2>/dev/null || true
+    chmod 600 /fragua-config/claude-oauth-token /fragua-config/codex/auth.json \
+              /fragua-config/fragua/token 2>/dev/null || true
+
+    echo "==> $restored restored, $skipped skipped"
+    [ "$restored" -gt 0 ] || { echo "error: nothing was restored" >&2; exit 1; }
+  '
+
+echo
+echo "Done. Start the agent so it reads the restored credentials:"
+echo "  $ENGINE compose up -d --force-recreate"
