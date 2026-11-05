@@ -35,6 +35,12 @@ services:
       - fragua-workdir:/fragua-workdir:rw   # agent working tree
       - fragua-data:/fragua-data:rw         # claude + fragua CLIs, runtime gems + node modules
     restart: unless-stopped
+    shm_size: 1g                            # Chrome crashes on Docker's 64MB default /dev/shm
+    logging:                                # the default log file grows without limit
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
 volumes:
   fragua-config:

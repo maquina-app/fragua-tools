@@ -16,7 +16,7 @@ Published as **`ghcr.io/maquina-app/fragua-docker:latest`**.
 
 ## What the image provides
 
-Built on `ubuntu:24.04`, it bundles:
+Built on `ubuntu:26.04`, it bundles:
 
 - **Language runtimes via [mise](https://mise.jdx.dev)** — Ruby and Node, pinned
   in `/usr/local/mise/config/config.toml`. Project-level `.mise.toml` files
@@ -30,7 +30,8 @@ Built on `ubuntu:24.04`, it bundles:
   - Databases — SQLite, PostgreSQL (`libpq`), MySQL/MariaDB client, `hiredis`
   - Image/media — ImageMagick, libvips, WebP, JPEG-turbo, PNG, HEIF, EXIF,
     RAW, `ffmpeg`
-  - PDF — `wkhtmltopdf` plus Liberation / DejaVu / Noto fonts
+  - PDF — Liberation / DejaVu / Noto fonts; render with the bundled Chrome
+    (Ubuntu 26.04 no longer packages `wkhtmltopdf`)
   - Parsing & RPC — libxml2/libxslt, Protobuf, gRPC tooling
   - Geospatial — GEOS, PROJ (for rgeo)
   - Rendering — Pango, Cairo
@@ -38,11 +39,18 @@ Built on `ubuntu:24.04`, it bundles:
   extension, `git`, Claude Code (`@anthropic-ai/claude-code`), the **Fragua CLI**, the
   **recuerd0 CLI**, and **equipr** (a skills/commands/MCP installer — all installed from
   the latest release).
-- **Headless browser automation** — [`agent-browser`](https://www.npmjs.com/package/agent-browser),
-  installed globally and pointed at a baked-in **Playwright Chromium** (with its OS
-  dependencies) via `AGENT_BROWSER_EXECUTABLE_PATH`. Chrome for Testing ships no
-  Linux arm64 build, so Playwright's Chromium is used instead; the agent can drive
-  a browser out of the box — no runtime download needed.
+- **Node / TypeScript** — `typescript`, `tsx`, `pnpm` and `yarn` installed globally,
+  plus `python3` so `node-gyp` can build native modules. Global `pnpm add -g`
+  packages persist in the `fragua-data` volume.
+- **Headless browser automation** — [`agent-browser`](https://www.npmjs.com/package/agent-browser)
+  and `playwright`, both using **Google Chrome** from Google's apt repository. The
+  build fails if Chrome is below `MIN_CHROME`. No runtime download is needed: use
+  `channel: "chrome"` (`--browser chrome` for the Playwright MCP server). A
+  project's own Playwright version can still run `npx playwright install chromium`.
+
+  Chrome doesn't update itself inside a container; a rebuild is what patches it.
+  The agent runs as root, so Chrome needs `--no-sandbox`. Playwright and
+  `agent-browser` handle that, but `--sandbox` makes Chrome refuse to start.
 
 Default command:
 
@@ -154,18 +162,35 @@ to GHCR by default.
 # clean rebuild
 ./build.sh --no-cache
 
-# re-fetch the latest Claude Code + fragua CLI (keeps the heavy layers cached)
+# apply OS security updates and re-fetch Chrome + the CLIs (keeps the heavy
+# layers cached)
 ./build.sh --refresh-cli
 
-# multi-arch build + push via buildx (Docker only). Pushes straight to the
-# registry, then pulls this host's variant back so local/fragua:latest is
-# still the image you just built.
+# multi-arch build + push via buildx (Docker only). Pushes a dated tag, pulls this
+# host's variant back as local/fragua:latest, smoke-tests it, then moves :latest.
 ./build.sh --platform linux/amd64,linux/arm64
+
+# publish without running smoke-test.sh
+./build.sh --skip-smoke
 ```
 
-> `--refresh-cli` busts only the Claude Code + fragua install layers (and the
-> cheap ones after), so you get the newest CLIs in the image's offline baseline
-> without the ~10–15 min full rebuild. Under the hood it passes
+Every build runs [`smoke-test.sh`](./smoke-test.sh) before `latest` moves, and always
+pulls the current `ubuntu:26.04` base. Pushing `latest` also pushes a dated tag
+such as `:20261104-1530`, so a bad image can be rolled back:
+
+```bash
+docker pull ghcr.io/maquina-app/fragua-docker:20261104-1530
+docker tag  ghcr.io/maquina-app/fragua-docker:20261104-1530 local/fragua:latest
+```
+
+Multi-arch pushes also attach an SBOM and build provenance, which vulnerability
+scanners can read. Rebuild regularly: **only a rebuild applies OS, Chrome, Ruby or
+Node security patches**. They don't reach a running container, and image updates
+never patch the kernel, which belongs to the host (or OrbStack's VM).
+
+> `--refresh-cli` busts the security-update layer, the CLI + Chrome install layers
+> and the cheap ones after, so you get patched packages and the newest CLIs without
+> the ~10–15 min full rebuild. Under the hood it passes
 > `--build-arg CLI_REFRESH=$(date +%s)`. For the common case — updating the CLIs
 > a running agent actually uses — prefer `fragua-refresh-cli` (see
 > [Updating the CLIs](#updating-the-clis-without-a-rebuild)); no rebuild needed.
@@ -190,10 +215,19 @@ export GITHUB_TOKEN=<PAT with write:packages scope>
   Publishing single-arch is easy to do by accident and fails late: the mismatch
   is only a `WARNING` on `docker run`, and the image then runs under QEMU, where
   Chromium aborts (`GPU process isn't usable`) rather than failing cleanly.
+- **amd64 can't be built under Rosetta** — Ubuntu 26.04's `tar` fails under OrbStack's
+  Rosetta emulation (`Cannot mkdir: Function not implemented`), which stops the
+  multi-arch build at its first `tar`. Turn Rosetta off to build with QEMU
+  (`orb config set rosetta false`, then restart OrbStack). Real amd64 hosts aren't
+  affected. Chrome still aborts under QEMU, so test amd64 on a real amd64 host.
 - **Package visibility** — the first push creates a **private** package. Make it
   public under
   [`maquina-app` packages](https://github.com/orgs/maquina-app/packages) if you
   want anonymous pulls.
+- **Recommended packages are skipped** — the image installs with
+  `--no-install-recommends`, so add anything a project needs from those explicitly.
+  `wkhtmltopdf` is gone too: Ubuntu 26.04 no longer packages it, so render PDFs
+  with Chrome.
 - **First build takes ~10–15 min** (the native library layer is large);
   subsequent cached rebuilds are fast.
 

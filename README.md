@@ -58,3 +58,6 @@ yourself.
 ## License
 
 The `fragua` binary is proprietary software. See [LICENSE](LICENSE).
+
+The image definitions and scripts in `container/` and `docker/` are MIT-licensed.
+See [container/LICENSE](container/LICENSE) and [docker/LICENSE](docker/LICENSE).

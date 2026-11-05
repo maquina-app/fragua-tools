@@ -1,0 +1,3 @@
+# Nothing here is COPY-ed into the image. Keep the build context empty so
+# fragua-backups/ (plaintext SSH keys and tokens) can never reach a builder.
+*

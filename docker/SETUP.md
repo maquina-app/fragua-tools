@@ -230,9 +230,8 @@ codex login --device-auth                  # follow the printed URL + code in yo
 ls "$CODEX_HOME/auth.json"                 # confirm auth.json was written
 
 # 7. agent-browser — headless browser automation. Nothing to log in or set up:
-#    it's installed globally and pointed at a baked-in Playwright Chromium via
-#    AGENT_BROWSER_EXECUTABLE_PATH (Chrome for Testing has no Linux arm64 build),
-#    so it's ready the moment the container starts.
+#    it's installed globally and pointed at the baked-in Google Chrome via
+#    AGENT_BROWSER_EXECUTABLE_PATH, so it's ready the moment the container starts.
 agent-browser --help                       # confirms it's on PATH
 
 # 8. equipr (optional) — installs skills/commands/MCP servers into the agents.
@@ -305,12 +304,17 @@ docker run \
   --detach \
   --name fragua-agent \
   --restart unless-stopped \
+  --shm-size=1g \
+  --log-opt max-size=10m --log-opt max-file=3 \
   -v fragua-config:/fragua-config:rw \
   -v fragua-secrets:/fragua-secrets:ro \
   -v fragua-workdir:/fragua-workdir:rw \
   -v fragua-data:/fragua-data:rw \
   local/fragua:latest
 ```
+
+> `--shm-size` stops Chrome crashing on Docker's 64MB default, and `--log-opt` caps
+> the log file. `compose.yaml` already sets both.
 
 > The config-dir env vars (`XDG_CONFIG_HOME`, `GH_CONFIG_DIR`,
 > `CLAUDE_CONFIG_DIR`, `GIT_CONFIG_GLOBAL`) are baked into the image, and the
@@ -540,6 +544,17 @@ prompt.
   `docker exec fragua-agent fragua-refresh-cli`.
 - **Agent doesn't appear online** — confirm `fragua login` succeeded inside the
   container (Phase 3c) and that the `fragua-config` volume is mounted in Phase 4.
+- **Native gems fail to load after upgrading from an Ubuntu 24.04 image**
+  (`cannot open shared object file`) — gems in the `fragua-data` volume were
+  compiled against the old system libraries. Run `gem pristine --all` or
+  `bundle pristine` in the affected project, or wipe the volume (see Lifecycle).
+- **`wkhtmltopdf: not found`** — Ubuntu 26.04 no longer packages it. Render PDFs
+  with Chrome (for example through Playwright's `page.pdf()`).
+- **Chrome: `Running as root without --no-sandbox is not supported`** — the agent
+  runs as root, so remove any `--sandbox` flag, including from a Playwright MCP
+  config. Use `--browser chrome` on its own.
+- **Chrome crashes or tabs die on heavy pages** — add `--shm-size=1g` to the run
+  line. `compose.yaml` already sets it.
 - **`linux/amd64` host can't run an arm64 image** — publish a multi-arch image
   with `./build.sh --platform linux/amd64,linux/arm64`, which also pulls this
   host's variant back and retags `local/fragua:latest`. Symptom to watch for:

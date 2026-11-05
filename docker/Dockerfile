@@ -1,8 +1,9 @@
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 LABEL org.opencontainers.image.source=https://github.com/maquina-app/fragua-tools
 LABEL org.opencontainers.image.description="Fragua agent runtime — full Rails stack with all native development libraries, for Docker / OrbStack"
-LABEL org.opencontainers.image.licenses=MIT
+# The definitions are MIT; the image also contains the proprietary fragua binary.
+LABEL org.opencontainers.image.licenses="MIT AND LicenseRef-Fragua-Proprietary"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV XDG_CONFIG_HOME=/fragua-config
@@ -29,10 +30,13 @@ ENV MISE_CONFIG_DIR=/usr/local/mise/config
 ENV PATH=/usr/local/mise/shims:/usr/local/mise/bin:$PATH
 
 # ── Native extension libs ─────────────────────────────────────────────────────
-RUN apt-get update && apt-get install -y \
+# --no-install-recommends drops ~1.2GB (docs, GUI, gfortran, extra fonts). Things
+# worth keeping from Recommends are listed explicitly below. Removing files in a
+# later layer doesn't shrink the image, so each RUN cleans up after itself.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     \
     # build toolchain
-    build-essential pkg-config cmake \
+    build-essential pkg-config cmake autoconf libtool \
     \
     # SSL / crypto
     libssl-dev \
@@ -59,14 +63,13 @@ RUN apt-get update && apt-get install -y \
     libprotobuf-dev protobuf-compiler \
     \
     # image processing
-    imagemagick libvips-dev \
+    imagemagick libmagickwand-dev ghostscript libvips-dev libvips-tools \
     libwebp-dev libjpeg-turbo8-dev libpng-dev \
-    libheif-dev libexif-dev libraw-dev \
+    libheif-dev libheif-plugin-aomenc libheif-plugin-libde265 libexif-dev libraw-dev \
     ffmpeg \
     \
-    # PDF generation
-    wkhtmltopdf \
-    fonts-liberation fonts-dejavu fonts-noto \
+    # PDF fonts (Ubuntu 26.04 dropped wkhtmltopdf; use the bundled Chromium)
+    fonts-liberation fonts-dejavu fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
     \
     # geospatial (rgeo)
     libgeos-dev libproj-dev \
@@ -74,14 +77,18 @@ RUN apt-get update && apt-get install -y \
     # font / graphics rendering
     libpango1.0-dev libcairo2-dev \
     \
+    # node-gyp — native npm modules
+    python3 \
+    \
     # network + utils
-    curl wget git ca-certificates gnupg openssh-client unzip \
+    curl wget git ca-certificates gnupg openssh-client unzip xz-utils bzip2 \
+    less file procps tzdata netbase shared-mime-info dbus tini \
     \
     # rbnacl — JWT, modern crypto
     libsodium-dev \
     \
     # ruby-ldap, enterprise auth
-    libsasl2-dev \
+    libsasl2-dev libsasl2-modules \
     \
     # libgdal-dev  # PostGIS / heavy geospatial (+150MB) — uncomment if needed
     \
@@ -94,7 +101,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
         https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y gh \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ── SSH known_hosts — let git authenticate to GitHub non-interactively ─────────
@@ -110,7 +117,7 @@ RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/mise/bin/mise sh 
 RUN mkdir -p /usr/local/mise/config \
     && cat > /usr/local/mise/config/config.toml <<'EOF'
 [tools]
-ruby = "4.0.0"
+ruby = "4.0.9"
 node = "26"
 EOF
 
@@ -129,14 +136,20 @@ RUN bundle config set --global build.nokogiri \
         "--with-hiredis-dir=/usr"
 
 # ── Ruby gems ─────────────────────────────────────────────────────────────────
-RUN gem install bundler \
-    && gem install rails
+RUN gem install bundler --no-document \
+    && gem install rails --no-document \
+    && rm -rf "$(gem env gemdir)"/cache/* /root/.cache/gem
 
 # ── Claude Code + Fragua CLI ──────────────────────────────────────────────────
 # Bump CLI_REFRESH to re-fetch the latest Claude Code AND fragua release without
 # a full --no-cache rebuild — it busts this layer and everything after it:
 #   docker build --build-arg CLI_REFRESH=$(date +%s) ...
 ARG CLI_REFRESH=0
+
+# Security updates: runs on --no-cache and --refresh-cli builds alike.
+RUN echo "apt refresh=${CLI_REFRESH}" \
+    && apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN echo "cli refresh=${CLI_REFRESH}" \
     && npm install -g @anthropic-ai/claude-code \
@@ -154,14 +167,34 @@ RUN curl -fsSL \
 RUN npm install -g @openai/codex \
     && npm cache clean --force
 
-# agent-browser — Chrome for Testing has no Linux arm64 build, so use Playwright's
-# Chromium (arm64 + amd64) and point agent-browser at it via AGENT_BROWSER_EXECUTABLE_PATH.
-RUN npm install -g agent-browser \
-    && npx --yes playwright install --with-deps chromium \
-    && ln -sf "$(find /root/.cache/ms-playwright -name chrome -type f -path '*chrome-linux*' | head -n1)" /usr/local/bin/chromium \
-    && npm cache clean --force \
-    && rm -rf /var/lib/apt/lists/*
+# Browser: Google Chrome from its apt repo, so --no-cache/--refresh-cli builds pick
+# up patches. Also the path Playwright's `--browser chrome` expects. The build fails
+# below MIN_CHROME. Runs as root, so Chrome needs --no-sandbox (Playwright and
+# agent-browser pass it); don't configure --sandbox.
+ARG MIN_CHROME=156.0.8078.73
+RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+      | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
+        > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update && apt-get install -y --no-install-recommends google-chrome-stable \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' google-chrome-stable)" ge "$MIN_CHROME" \
+    && ln -sf /usr/bin/google-chrome-stable /usr/local/bin/chromium \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# agent-browser ships binaries for every OS; keep this platform's only.
+RUN npm install -g agent-browser playwright \
+    && case "$(dpkg --print-architecture)" in arm64) keep=linux-arm64 ;; *) keep=linux-x64 ;; esac \
+    && find "$(npm root -g)/agent-browser/bin" -type f -name 'agent-browser-*' ! -name "agent-browser-$keep" -delete \
+    && mise reshim \
+    && npm cache clean --force
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/local/bin/chromium
+
+# Node / TypeScript toolchain. `pnpm add -g` lands in the fragua-data volume.
+RUN npm install -g typescript tsx pnpm yarn \
+    && mise reshim \
+    && npm cache clean --force
+ENV PNPM_HOME=/fragua-data/pnpm
+ENV PATH=/fragua-data/pnpm/bin:$PATH
 
 RUN gh extension install basecamp/gh-signoff
 
@@ -374,5 +407,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 CMD \
   fragua status --json 2>/dev/null \
   | ruby -rjson -rtime -e 'd=(JSON.parse($stdin.read)["daemon"] rescue nil); t=d&&d["last_heartbeat_ok_at"]; exit 1 unless t; exit((Time.now-Time.parse(t))<300 ? 0 : 1)'
 
-ENTRYPOINT ["/usr/local/bin/fragua-entrypoint.sh"]
+# tini is PID 1 so orphaned processes (Chrome's helpers above all) get reaped.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/fragua-entrypoint.sh"]
 CMD ["fragua", "agent", "--workdir", "/fragua-workdir"]

@@ -5,6 +5,12 @@ This software, including the "fragua" command-line binary and any accompanying
 files (the "Software"), is the proprietary and confidential property of Mario
 Alberto Chávez Cárdenas (the "Licensor"). The Software is licensed, not sold.
 
+The files in the container/ and docker/ directories of this repository are not
+part of the Software. They are licensed under the MIT License in the LICENSE file
+of each directory. That license does not cover the "fragua" binary, including a
+copy installed into an image built from those files; this License still applies
+to it.
+
 1. License grant.
    Subject to your continuous compliance with this License and with the Fragua
    Terms of Service published at https://fragua.app/terms (the "Terms"), the
