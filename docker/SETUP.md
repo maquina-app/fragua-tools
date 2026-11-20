@@ -110,7 +110,7 @@ docker volume ls | grep fragua
 
 | Volume           | Mount path        | Runtime mode | Holds                                              |
 | ---------------- | ----------------- | ------------ | -------------------------------------------------- |
-| `fragua-config`  | `/fragua-config`  | `rw`         | fragua token + status/DB, `gitconfig` (`GIT_CONFIG_GLOBAL`), claude token + state (`CLAUDE_CONFIG_DIR=/fragua-config/claude`), equipr config + skills cache/state (`/fragua-config/equipr`) + equipr-installed skills (`~/.claude` → `/fragua-config/claude`) |
+| `fragua-config`  | `/fragua-config`  | `rw`         | fragua token + status/DB, `gitconfig` (`GIT_CONFIG_GLOBAL`), claude token + state (`CLAUDE_CONFIG_DIR=/fragua-config/claude`), codex + copilot login and state (`CODEX_HOME`, `COPILOT_HOME`), equipr config + skills cache/state (`/fragua-config/equipr`) + equipr-installed skills (`~/.claude` → `/fragua-config/claude`) |
 | `fragua-secrets` | `/fragua-secrets` | `ro`*        | gh token (`GH_CONFIG_DIR=/fragua-secrets/gh`) + SSH keypair (`/root/.ssh` → `/fragua-secrets/ssh`) |
 | `fragua-workdir` | `/fragua-workdir` | `rw`         | clones, `bundle install`, DBs, assets (`FRAGUA_WORKDIR`) |
 | `fragua-data`    | `/fragua-data`    | `rw`         | `claude` + `fragua` + `recuerd0` + `equipr` CLIs (installed on first boot), plus runtime `gem install` / `bundle install` / `npm install -g` output (`GEM_HOME`, `NPM_CONFIG_PREFIX`) |
@@ -172,6 +172,7 @@ docker run --rm -it \
 # 0. Create the secret subdirs (the empty volume hides the image's baked dirs)
 mkdir -p /fragua-secrets/gh /fragua-secrets/ssh && chmod 700 /fragua-secrets/ssh
 mkdir -p /fragua-config/codex    # ensure CODEX_HOME exists (volume hides image-baked dirs)
+mkdir -p /fragua-config/copilot  # same for COPILOT_HOME
 
 # 1. GitHub CLI — device-code flow works headless (opens a code + URL).
 #    --insecure-storage forces the token into GH_CONFIG_DIR=/fragua-secrets/gh on
@@ -228,6 +229,26 @@ recuerd0 workspace list                    # confirms it works
 printf '[settings]\ncli_auth_credentials_store = "file"\n' >> "$CODEX_HOME/config.toml"
 codex login --device-auth                  # follow the printed URL + code in your browser
 ls "$CODEX_HOME/auth.json"                 # confirm auth.json was written
+
+# 6b. GitHub Copilot CLI (optional) — COPILOT_HOME=/fragua-config/copilot is set
+#     automatically, so its login AND its session state persist in the
+#     fragua-config volume. It needs a Copilot plan on the GitHub account you
+#     sign in with; a Copilot Free plan runs only the "Fusion (auto)" engine.
+#     The container has no keychain, so the login must be stored as a file:
+cat "$COPILOT_HOME/settings.json"          # expect "storeTokenPlaintext": true
+#     (missing? printf '{"storeTokenPlaintext": true, "autoUpdate": false}\n' > "$COPILOT_HOME/settings.json")
+#     Option A — device-code login (one-time):
+copilot login --device-code                # follow the printed URL + code in your browser
+#     Option B — a fine-grained personal access token with the "Copilot Requests"
+#     permission (classic tokens are rejected), loaded on every start:
+#       printf '%s' 'github_pat_...' > /fragua-config/copilot-github-token
+#       chmod 600 /fragua-config/copilot-github-token
+#     It is exported as COPILOT_GITHUB_TOKEN on purpose — Copilot would also read
+#     GH_TOKEN, which belongs to gh.
+#     Copilot's own help says it will also use an existing `gh auth login`. That has
+#     not been confirmed inside this image, and `fragua doctor` does not count it,
+#     so use A or B if you want Copilot runs here.
+fragua doctor                              # the copilot line names where the login comes from
 
 # 7. agent-browser — headless browser automation. Nothing to log in or set up:
 #    it's installed globally and pointed at the baked-in Google Chrome via
@@ -341,7 +362,7 @@ docker build --no-cache -t local/fragua:latest .
 # re-run 4b — no re-login, workdir + gem/node cache preserved
 
 # update the CLIs (Claude Code + fragua + recuerd0 + equipr) a running agent uses — no rebuild:
-docker exec fragua-agent fragua-refresh-cli           # all (or: claude / fragua / recuerd0 / equipr)
+docker exec fragua-agent fragua-refresh-cli           # all (or: claude / codex / copilot / fragua / recuerd0 / equipr)
 # (refresh only the image's offline baseline instead: ./build.sh --refresh-cli)
 
 # inspect the workdir without touching the running agent
@@ -363,7 +384,7 @@ docker volume rm fragua-workdir fragua-config fragua-secrets fragua-data
 ## Backing up your credentials — and moving them to another machine
 
 Everything that would force you through the Phase 3 setup again — the gh token,
-the SSH keypair, the Claude/Codex/fragua tokens, your Git identity and the
+the SSH keypair, the Claude/Codex/Copilot/fragua tokens, your Git identity and the
 recuerd0 config — lives in the `fragua-config` + `fragua-secrets` volumes.
 `fragua-backup` packs exactly those files into **one archive** you can `scp`
 anywhere and restore into another machine's volumes. Everything else in the
@@ -387,6 +408,9 @@ with a note rather than failing. What goes in:
 | `/fragua-config/claude-oauth-token`     | Claude Code token              |
 | `/fragua-config/codex/config.toml`      | Codex CLI config               |
 | `/fragua-config/codex/auth.json`        | Codex CLI credentials          |
+| `/fragua-config/copilot/settings.json`  | Copilot CLI settings           |
+| `/fragua-config/copilot/config.json`    | Copilot CLI stored login       |
+| `/fragua-config/copilot-github-token`   | Copilot token, if you use one  |
 | `/fragua-config/fragua/config.toml`     | fragua CLI config              |
 | `/fragua-config/fragua/token`           | fragua agent token             |
 | `/fragua-config/gitconfig`              | Git identity + credential helper |
@@ -478,7 +502,7 @@ prompt.
 
 > If `gh` reports "not authenticated" after a restore onto a much newer image,
 > the `hosts.yml` schema changed; re-run `gh auth login --insecure-storage` in a
-> `--bash` session. The SSH key, Claude, Codex and fragua tokens are plain files
+> `--bash` session. The SSH key, Claude, Codex, Copilot and fragua tokens are plain files
 > and always restore cleanly.
 
 ---
