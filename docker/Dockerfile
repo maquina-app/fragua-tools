@@ -16,6 +16,12 @@ ENV GH_CONFIG_DIR=/fragua-secrets/gh
 ENV GH_NO_UPDATE_NOTIFIER=1
 ENV CLAUDE_CONFIG_DIR=/fragua-config/claude
 ENV CODEX_HOME=/fragua-config/codex
+# GitHub Copilot CLI: config, stored login and session state all live under
+# COPILOT_HOME, so they persist in the fragua-config volume. Auto-update is off:
+# a run must not swap the binary under the version the agent advertised —
+# update it deliberately with `fragua-refresh-cli copilot`.
+ENV COPILOT_HOME=/fragua-config/copilot
+ENV COPILOT_AUTO_UPDATE=false
 # This image runs as root by design (isolated container, no host mounts at
 # runtime, isolated named volumes). Claude Code refuses
 # --dangerously-skip-permissions as root unless it detects a recognized sandbox;
@@ -167,6 +173,9 @@ RUN curl -fsSL \
 RUN npm install -g @openai/codex \
     && npm cache clean --force
 
+RUN npm install -g @github/copilot \
+    && npm cache clean --force
+
 # Browser: Google Chrome from its apt repo, so --no-cache/--refresh-cli builds pick
 # up patches. Also the path Playwright's `--browser chrome` expects. The build fails
 # below MIN_CHROME. Runs as root, so Chrome needs --no-sandbox (Playwright and
@@ -202,12 +211,13 @@ RUN gh extension install basecamp/gh-signoff
 # own SSH dir is a symlink into the (read-only at runtime) secrets volume, so the
 # key lives beside the gh token and the agent can use but not overwrite it.
 RUN mkdir -p \
-        /fragua-config /fragua-config/claude /fragua-config/codex \
+        /fragua-config /fragua-config/claude /fragua-config/codex /fragua-config/copilot \
         /fragua-config/agents/skills \
         /fragua-secrets/gh /fragua-secrets/ssh \
         /fragua-workdir \
         /fragua-data/gems /fragua-data/npm /fragua-data/bin \
     && printf '[settings]\ncli_auth_credentials_store = "file"\n' > /fragua-config/codex/config.toml \
+    && printf '{"storeTokenPlaintext": true, "autoUpdate": false}\n' > /fragua-config/copilot/settings.json \
     && rm -rf /root/.ssh \
     && ln -s /fragua-secrets/ssh /root/.ssh \
     && chmod 700 /fragua-secrets/ssh \
@@ -267,12 +277,12 @@ for a in "$@"; do
   case "$a" in
     --promote)     MODE=promote ;;
     --if-missing)  MODE=if-missing ;;
-    claude|codex|fragua|recuerd0|equipr) ONLY="$a" ;;
-    *) echo "usage: fragua-refresh-cli [--promote|--if-missing] [claude|codex|fragua|recuerd0|equipr]" >&2; exit 1 ;;
+    claude|codex|copilot|fragua|recuerd0|equipr) ONLY="$a" ;;
+    *) echo "usage: fragua-refresh-cli [--promote|--if-missing] [claude|codex|copilot|fragua|recuerd0|equipr]" >&2; exit 1 ;;
   esac
 done
 export NPM_CONFIG_PREFIX=/fragua-data/npm
-mkdir -p /fragua-data/npm/lib/node_modules/@anthropic-ai /fragua-data/npm/lib/node_modules/@openai /fragua-data/npm/bin /fragua-data/bin
+mkdir -p /fragua-data/npm/lib/node_modules/@anthropic-ai /fragua-data/npm/lib/node_modules/@openai /fragua-data/npm/lib/node_modules/@github /fragua-data/npm/bin /fragua-data/bin
 
 # The volume holds arch-specific binaries. If it was filled on another arch
 # (image rebuilt or pulled for a different platform) those copies are junk:
@@ -291,7 +301,8 @@ if [ "$stale" = 1 ]; then
   echo "==> volume CLI copies are for another arch - clearing so this boot re-promotes"
   rm -rf /fragua-data/npm/lib/node_modules/@anthropic-ai/claude-code \
          /fragua-data/npm/lib/node_modules/@openai/codex \
-         /fragua-data/npm/bin/claude /fragua-data/npm/bin/codex \
+         /fragua-data/npm/lib/node_modules/@github/copilot \
+         /fragua-data/npm/bin/claude /fragua-data/npm/bin/codex /fragua-data/npm/bin/copilot \
          /fragua-data/bin/fragua /fragua-data/bin/recuerd0 /fragua-data/bin/equipr
 fi
 printf '%s\n' "$ARCH" > "$STAMP" 2>/dev/null || true
@@ -339,20 +350,28 @@ static_cli equipr   https://github.com/maquina-app/equipr/releases/latest/downlo
 
 if want claude; then fragua-npm-cli claude @anthropic-ai/claude-code "$MODE"; fi
 if want codex;  then fragua-npm-cli codex  @openai/codex             "$MODE"; fi
+if want copilot; then fragua-npm-cli copilot @github/copilot          "$MODE"; fi
 
 echo "==> active CLIs:"
 command -v fragua && fragua --version 2>/dev/null || true
 command -v claude && claude --version 2>/dev/null || true
 command -v codex && codex --version 2>/dev/null || true
+command -v copilot && copilot --version 2>/dev/null || true
 command -v recuerd0 && recuerd0 version 2>/dev/null || true
 command -v equipr && equipr --version 2>/dev/null || true
 EOF
 RUN chmod +x /usr/local/bin/fragua-refresh-cli
 
-# ── Entrypoint — load the Claude token + wire the runtime-toolchain volume ─────
+# ── Entrypoint — load the Claude + Copilot tokens + wire the runtime-toolchain volume ─────
 # 1. Claude token: write it into the fragua-config volume once during setup and
 #    the agent picks it up on every run — no env needed. An explicit
 #    CLAUDE_CODE_OAUTH_TOKEN in the environment still wins if you'd rather pass it.
+#    Copilot is the same idea with /fragua-config/copilot-github-token →
+#    COPILOT_GITHUB_TOKEN, for a fine-grained token instead of `copilot login`.
+#    That variable and no other: Copilot would also read GH_TOKEN, which is gh's.
+#    The entrypoint also re-creates Copilot's settings file, because a
+#    fragua-config volume made before this image hides the one baked in above —
+#    and without storeTokenPlaintext a `copilot login` has no keychain to land in.
 # 2. Toolchain redirect: point gem/npm installs at the rw /fragua-data volume so
 #    runtime `gem install` / `bundle install` / `npm install -g` survive a
 #    rebuild. This is set HERE (runtime), not as a build ENV — otherwise the
@@ -364,6 +383,15 @@ set -e
 if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -r /fragua-config/claude-oauth-token ]; then
   CLAUDE_CODE_OAUTH_TOKEN="$(cat /fragua-config/claude-oauth-token)"
   export CLAUDE_CODE_OAUTH_TOKEN
+fi
+if [ -z "${COPILOT_GITHUB_TOKEN:-}" ] && [ -r /fragua-config/copilot-github-token ]; then
+  COPILOT_GITHUB_TOKEN="$(cat /fragua-config/copilot-github-token)"
+  export COPILOT_GITHUB_TOKEN
+fi
+if [ ! -e /fragua-config/copilot/settings.json ]; then
+  mkdir -p /fragua-config/copilot 2>/dev/null \
+    && printf '{"storeTokenPlaintext": true, "autoUpdate": false}\n' > /fragua-config/copilot/settings.json \
+    || true
 fi
 mkdir -p /fragua-data/gems /fragua-data/npm /fragua-data/bin 2>/dev/null || true
 export GEM_HOME=/fragua-data/gems
@@ -382,6 +410,9 @@ RUN cat > /etc/profile.d/fragua-runtime.sh <<'EOF'
 if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -r /fragua-config/claude-oauth-token ]; then
   export CLAUDE_CODE_OAUTH_TOKEN="$(cat /fragua-config/claude-oauth-token)"
 fi
+if [ -z "${COPILOT_GITHUB_TOKEN:-}" ] && [ -r /fragua-config/copilot-github-token ]; then
+  export COPILOT_GITHUB_TOKEN="$(cat /fragua-config/copilot-github-token)"
+fi
 export GEM_HOME=/fragua-data/gems
 export GEM_PATH="${GEM_HOME}:$(ruby -e 'print Gem.default_dir' 2>/dev/null)"
 export NPM_CONFIG_PREFIX=/fragua-data/npm
@@ -390,6 +421,7 @@ EOF
 
 RUN { \
       echo '[ -r /fragua-config/claude-oauth-token ] && export CLAUDE_CODE_OAUTH_TOKEN="$(cat /fragua-config/claude-oauth-token)"'; \
+      echo '[ -r /fragua-config/copilot-github-token ] && export COPILOT_GITHUB_TOKEN="$(cat /fragua-config/copilot-github-token)"'; \
       echo 'export GEM_HOME=/fragua-data/gems'; \
       echo 'export GEM_PATH="${GEM_HOME}:$(ruby -e '"'"'print Gem.default_dir'"'"' 2>/dev/null)"'; \
       echo 'export NPM_CONFIG_PREFIX=/fragua-data/npm'; \

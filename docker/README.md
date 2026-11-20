@@ -36,7 +36,7 @@ Built on `ubuntu:26.04`, it bundles:
   - Geospatial — GEOS, PROJ (for rgeo)
   - Rendering — Pango, Cairo
 - **CLIs** — GitHub CLI (`gh`) with the [`gh-signoff`](https://github.com/basecamp/gh-signoff)
-  extension, `git`, Claude Code (`@anthropic-ai/claude-code`), the **Fragua CLI**, the
+  extension, `git`, Claude Code (`@anthropic-ai/claude-code`), Codex (`@openai/codex`), GitHub Copilot (`@github/copilot`), the **Fragua CLI**, the
   **recuerd0 CLI**, and **equipr** (a skills/commands/MCP installer — all installed from
   the latest release).
 - **Node / TypeScript** — `typescript`, `tsx`, `pnpm` and `yarn` installed globally,
@@ -102,7 +102,7 @@ loads it on every run. See the guide for the exact steps.
 ## Backing up credentials
 
 `./fragua-backup` packs the files that would otherwise force a full re-setup — the
-gh token, SSH keypair, Claude/Codex/fragua tokens, `gitconfig` and the recuerd0
+gh token, SSH keypair, Claude/Codex/Copilot/fragua tokens, `gitconfig` and the recuerd0
 config — into **one archive** you can copy to another machine and restore into
 its volumes:
 
@@ -138,6 +138,8 @@ is logged). To pull the latest versions into a running container — no rebuild:
 ```bash
 docker exec fragua-agent fragua-refresh-cli            # update all
 docker exec fragua-agent fragua-refresh-cli claude     # just Claude Code
+docker exec fragua-agent fragua-refresh-cli codex      # just Codex
+docker exec fragua-agent fragua-refresh-cli copilot    # just GitHub Copilot
 docker exec fragua-agent fragua-refresh-cli fragua     # just fragua
 docker exec fragua-agent fragua-refresh-cli recuerd0   # just recuerd0
 docker exec fragua-agent fragua-refresh-cli equipr     # just equipr

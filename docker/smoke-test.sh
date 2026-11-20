@@ -34,6 +34,7 @@ check recuerd0      recuerd0 version
 check equipr        equipr --version
 check claude        claude --version
 check codex         codex --version
+check copilot       copilot --version
 check gh            gh --version
 check gh-signoff    test -d /root/.local/share/gh/extensions/gh-signoff
 check chrome        google-chrome-stable --version
