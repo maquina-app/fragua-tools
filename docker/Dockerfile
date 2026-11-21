@@ -123,8 +123,10 @@ RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/mise/bin/mise sh 
 RUN mkdir -p /usr/local/mise/config \
     && cat > /usr/local/mise/config/config.toml <<'EOF'
 [tools]
-ruby = "4.0.9"
-node = "26"
+# The first version listed is the default. The others are installed too, so a
+# project that pins one of them finds it without a download.
+ruby = ["4.0.10", "4.0.9"]
+node = ["26", "26.7.0"]
 EOF
 
 RUN mise install --yes \
